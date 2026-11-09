@@ -214,7 +214,7 @@ const PALETTE = [0x1a1c2c, 0x5d275d, 0xb13e53, 0xef7d57, 0xffcd75, 0xa7f070, 0x3
 const TOOL_NAMES = ['кисть', 'маркер', 'спрей', 'пиксель', 'споры'];
 let tool = Number(store.get('tool') ?? 0);
 let color = Number(store.get('color') ?? 0xff77a8);
-let size = Number(store.get('size') ?? 12);
+let size = Number(store.get('size2') ?? 24);
 
 // ------------------------------------------------------------------ input
 const keys = new Set<string>();
@@ -241,7 +241,7 @@ addEventListener('mousemove', (e) => {
 });
 addEventListener('mousedown', (e) => { if (locked && e.button === 0) mouseDown = true; });
 addEventListener('mouseup', (e) => { if (e.button === 0) { mouseDown = false; } });
-addEventListener('wheel', (e) => { if (locked) setSize(size + (e.deltaY < 0 ? 2 : -2)); }, { passive: true });
+addEventListener('wheel', (e) => { if (locked) setSize(e.deltaY < 0 ? size * 1.15 + 1 : size / 1.15 - 1); }, { passive: true });
 
 addEventListener('keydown', (e) => {
   if ((e.target as HTMLElement).tagName === 'INPUT') return;
@@ -412,7 +412,7 @@ function setColor(c: number) {
   flushChunk(true);
 }
 function setSize(s: number) {
-  size = Math.max(MIN_SIZE, Math.min(MAX_SIZE, Math.round(s))); store.set('size', String(size));
+  size = Math.max(MIN_SIZE, Math.min(MAX_SIZE, Math.round(s))); store.set('size2', String(size));
   $<HTMLInputElement>('size').value = String(size);
   $('size-label').textContent = String(size);
   const d = 6 + (size / MAX_SIZE) * 12;

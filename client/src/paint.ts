@@ -37,13 +37,13 @@ export function drawSegment(ctx: CanvasRenderingContext2D, panelH: number, tool:
       break;
     }
     case 1: { // marker: flat chisel tip, slightly translucent
-      ctx.fillStyle = col; ctx.globalAlpha = 0.55;
+      ctx.fillStyle = col; ctx.globalAlpha = 0.92;
       const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / Math.max(1, w * 0.15)));
       for (let k = 0; k <= n; k++) {
         if (k === 0 && i > 0) continue; // avoid double-darkening joints
         const t = k / n;
         const x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
-        ctx.fillRect(x - w / 2, y - w / 6, w, w / 3);
+        ctx.fillRect(x - w / 2, y - w / 4, w, w / 2);
       }
       break;
     }
@@ -51,12 +51,12 @@ export function drawSegment(ctx: CanvasRenderingContext2D, panelH: number, tool:
       const r = rng(seed * 7919 + i * 104729);
       ctx.fillStyle = col;
       const len = Math.hypot(x1 - x0, y1 - y0);
-      const dots = Math.min(400, Math.ceil(10 + (len / Math.max(1, w)) * 26 + w * 0.8));
+      const dots = Math.min(900, Math.ceil(25 + (len / Math.max(1, w)) * 70 + w * 2.2));
       for (let k = 0; k < dots; k++) {
         const t = r();
-        const a = r() * Math.PI * 2, d = Math.sqrt(r()) * w * 0.5 * (0.4 + r() * 0.6);
-        const s = r() < 0.15 ? 2 : 1;
-        ctx.globalAlpha = 0.5 + r() * 0.5;
+        const a = r() * Math.PI * 2, d = Math.pow(r(), 0.7) * w * 0.5;
+        const s = r() < 0.4 ? 2 : 1;
+        ctx.globalAlpha = 0.75 + r() * 0.25;
         ctx.fillRect(Math.round(x0 + (x1 - x0) * t + Math.cos(a) * d), Math.round(y0 + (y1 - y0) * t + Math.sin(a) * d), s, s);
       }
       break;
@@ -85,7 +85,8 @@ export function drawSegment(ctx: CanvasRenderingContext2D, panelH: number, tool:
         const t = (k + r()) / n;
         const x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
         const g = ctx.createRadialGradient(x, y, 0, x, y, w * 0.6);
-        g.addColorStop(0, css(color) + '55');
+        g.addColorStop(0, css(color) + 'cc');
+        g.addColorStop(0.5, css(color) + '66');
         g.addColorStop(1, css(color) + '00');
         ctx.fillStyle = g;
         ctx.fillRect(x - w * 0.6, y - w * 0.6, w * 1.2, w * 1.2);
@@ -137,7 +138,8 @@ export class PaintLayer {
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 4;
-    const mat = new THREE.MeshLambertMaterial({ map: tex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    // paint is lit like the wall, plus part of its own colour, so it reads as the swatch you picked even in shade
+    const mat = new THREE.MeshLambertMaterial({ map: tex, emissiveMap: tex, emissive: 0xffffff, emissiveIntensity: 0.4, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(panel.w, panel.h), mat);
     mesh.position.set(
       panel.ox + panel.ux * panel.w / 2 + panel.nx * 0.004,
