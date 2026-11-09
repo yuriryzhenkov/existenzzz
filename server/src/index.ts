@@ -78,7 +78,7 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
-    const world = () => env.WORLD.get(env.WORLD.idFromName('world-v1'));
+    const world = () => env.WORLD.get(env.WORLD.idFromName('world-main'));
 
     switch (url.pathname) {
       case '/':
