@@ -1,0 +1,14 @@
+name = "existenzzz"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+
+[vars]
+BOT_USERNAME = ""
+
+[[durable_objects.bindings]]
+name = "WORLD"
+class_name = "World"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["World"]

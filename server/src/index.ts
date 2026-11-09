@@ -1,0 +1,336 @@
+import { DurableObject } from 'cloudflare:workers';
+import { DOOR_BY_ID, PANEL_BY_ID } from '../../shared/world';
+import { MAX_SIZE, MAX_STROKE_NUMS, MIN_SIZE, type ClientMsg, type PlayerInfo, type PState, type ServerMsg, type StrokeData } from '../../shared/protocol';
+
+export interface Env {
+  WORLD: DurableObjectNamespace<World>;
+  BOT_TOKEN?: string;
+  BOT_USERNAME?: string;
+  SESSION_SECRET?: string;
+}
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+  'Access-Control-Allow-Headers': 'content-type',
+};
+const json = (data: unknown, status = 200, extra: Record<string, string> = {}) =>
+  new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', ...CORS, ...extra } });
+
+// ---------------- crypto helpers ----------------
+const enc = new TextEncoder();
+const hex = (buf: ArrayBuffer) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+async function hmac(key: ArrayBuffer | Uint8Array, msg: string) {
+  const k = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return crypto.subtle.sign('HMAC', k, enc.encode(msg));
+}
+const b64u = (s: string) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64u = (s: string) => decodeURIComponent(escape(atob(s.replace(/-/g, '+').replace(/_/g, '/'))));
+
+function secretOf(env: Env) {
+  return env.SESSION_SECRET || 'dev-secret-change-me';
+}
+async function signSession(env: Env, user: { uid: string; name: string; photo: string | null }) {
+  const body = b64u(JSON.stringify({ ...user, exp: Date.now() + 1000 * 60 * 60 * 24 * 30 }));
+  const sig = hex(await hmac(enc.encode(secretOf(env)), body));
+  return body + '.' + sig;
+}
+async function verifySession(env: Env, token: string) {
+  const [body, sig] = token.split('.');
+  if (!body || !sig) return null;
+  const want = hex(await hmac(enc.encode(secretOf(env)), body));
+  if (want !== sig) return null;
+  const data = JSON.parse(unb64u(body));
+  if (data.exp < Date.now()) return null;
+  return data as { uid: string; name: string; photo: string | null };
+}
+
+function cleanName(s: string) {
+  return (s || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 24) || 'спора';
+}
+
+async function verifyWidget(env: Env, data: Record<string, string>) {
+  if (!env.BOT_TOKEN) return null;
+  const { hash, ...rest } = data;
+  const check = Object.keys(rest).sort().map((k) => `${k}=${rest[k]}`).join('\n');
+  const secret = await crypto.subtle.digest('SHA-256', enc.encode(env.BOT_TOKEN));
+  if (hex(await hmac(secret, check)) !== hash) return null;
+  if (Date.now() / 1000 - Number(rest.auth_date) > 86400 * 2) return null;
+  const name = [rest.first_name, rest.last_name].filter(Boolean).join(' ') || rest.username;
+  return { uid: 'tg:' + rest.id, name: cleanName(name), photo: rest.photo_url || null };
+}
+
+async function verifyWebApp(env: Env, initData: string) {
+  if (!env.BOT_TOKEN) return null;
+  const params = new URLSearchParams(initData);
+  const hash = params.get('hash');
+  params.delete('hash');
+  const check = [...params.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => `${k}=${v}`).join('\n');
+  const secret = await hmac(enc.encode('WebAppData'), env.BOT_TOKEN);
+  if (hex(await hmac(secret, check)) !== hash) return null;
+  const u = JSON.parse(params.get('user') || '{}');
+  const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.username;
+  return { uid: 'tg:' + u.id, name: cleanName(name), photo: u.photo_url || null };
+}
+
+// ---------------- Worker entry ----------------
+export default {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(req.url);
+    if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
+    const world = () => env.WORLD.get(env.WORLD.idFromName('world-v1'));
+
+    switch (url.pathname) {
+      case '/':
+        return new Response('existenzzz server: alive', { headers: CORS });
+      case '/api/config':
+        return json({ bot: env.BOT_USERNAME || null });
+      case '/api/auth/telegram': {
+        const data = (await req.json()) as Record<string, string>;
+        const user = await verifyWidget(env, Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])));
+        if (!user) return json({ error: 'bad telegram auth' }, 401);
+        return json({ token: await signSession(env, user), user });
+      }
+      case '/api/auth/webapp': {
+        const { initData } = (await req.json()) as { initData: string };
+        const user = await verifyWebApp(env, initData);
+        if (!user) return json({ error: 'bad webapp auth' }, 401);
+        return json({ token: await signSession(env, user), user });
+      }
+      case '/api/avatar': {
+        const u = url.searchParams.get('u') || '';
+        let target: URL;
+        try { target = new URL(u); } catch { return json({ error: 'bad url' }, 400); }
+        if (target.protocol !== 'https:' || !/(^|\.)(t\.me|telegram\.org|telegram-cdn\.org|telesco\.pe)$/.test(target.hostname)) return json({ error: 'host not allowed' }, 400);
+        const cache = caches.default;
+        const key = new Request(url.toString());
+        const hit = await cache.match(key);
+        if (hit) return hit;
+        const r = await fetch(target.toString(), { redirect: 'follow' });
+        if (!r.ok) return json({ error: 'upstream' }, 502);
+        const res = new Response(r.body, { headers: { 'content-type': r.headers.get('content-type') || 'image/jpeg', 'cache-control': 'public, max-age=86400', ...CORS } });
+        ctx.waitUntil(cache.put(key, res.clone()));
+        return res;
+      }
+      case '/ws': {
+        if (req.headers.get('Upgrade') !== 'websocket') return new Response('expected websocket', { status: 426 });
+        const token = url.searchParams.get('token');
+        let user: { uid: string; name: string; photo: string | null } | null = null;
+        if (token) user = await verifySession(env, token);
+        if (!user) {
+          const gid = (url.searchParams.get('gid') || '').replace(/[^a-z0-9]/gi, '').slice(0, 16);
+          if (!gid) return new Response('no identity', { status: 400 });
+          user = { uid: 'g:' + gid, name: cleanName(url.searchParams.get('name') || ''), photo: null };
+        }
+        const fwd = new URL('https://world/ws');
+        fwd.searchParams.set('u', JSON.stringify(user));
+        return world().fetch(new Request(fwd, req));
+      }
+      case '/api/panels':
+      case '/api/stats':
+        return world().fetch(new Request('https://world' + url.pathname + url.search));
+    }
+    return json({ error: 'not found' }, 404);
+  },
+};
+
+// ---------------- World Durable Object ----------------
+interface Attach {
+  info: PlayerInfo;
+  s: [number, number, number, number, number, number] | null;
+}
+
+interface Conn {
+  ws: WebSocket;
+  info: PlayerInfo;
+  s: [number, number, number, number, number, number] | null;
+  lastPersist: number;
+  bucket: number; // stroke rate limit tokens
+  bucketT: number;
+  doorT: number;
+}
+
+export class World extends DurableObject<Env> {
+  sql: SqlStorage;
+  conns = new Map<WebSocket, Conn>();
+  dirty = new Set<Conn>();
+  flushTimer: ReturnType<typeof setTimeout> | null = null;
+  panelCounts: Map<string, number> | null = null;
+  doors: Map<string, boolean> | null = null;
+  totalStrokes = 0;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS strokes (id INTEGER PRIMARY KEY AUTOINCREMENT, panel TEXT NOT NULL, uid TEXT NOT NULL, d TEXT NOT NULL, t INTEGER NOT NULL)`);
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS strokes_panel ON strokes(panel, id)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS doors (id TEXT PRIMARY KEY, open INTEGER NOT NULL)`);
+    // restore connections after hibernation
+    for (const ws of ctx.getWebSockets()) {
+      const a = ws.deserializeAttachment() as Attach | null;
+      if (a) this.conns.set(ws, { ws, info: a.info, s: a.s, lastPersist: 0, bucket: 40, bucketT: Date.now(), doorT: 0 });
+    }
+  }
+
+  getPanelCounts() {
+    if (!this.panelCounts) {
+      this.panelCounts = new Map();
+      this.totalStrokes = 0;
+      for (const r of this.sql.exec<{ panel: string; n: number }>(`SELECT panel, COUNT(*) AS n FROM strokes GROUP BY panel`)) {
+        this.panelCounts.set(r.panel, r.n);
+        this.totalStrokes += r.n;
+      }
+    }
+    return this.panelCounts;
+  }
+  getDoors() {
+    if (!this.doors) {
+      this.doors = new Map();
+      for (const d of DOOR_BY_ID.keys()) this.doors.set(d, true);
+      for (const r of this.sql.exec<{ id: string; open: number }>(`SELECT id, open FROM doors`)) this.doors.set(r.id, !!r.open);
+    }
+    return this.doors;
+  }
+
+  async fetch(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+    if (url.pathname === '/ws') return this.accept(JSON.parse(url.searchParams.get('u')!));
+    if (url.pathname === '/api/stats') {
+      this.getPanelCounts();
+      return json({ online: this.conns.size, strokes: this.totalStrokes, players: [...this.conns.values()].map((c) => c.info.name) });
+    }
+    if (url.pathname === '/api/panels') {
+      const ids = (url.searchParams.get('ids') || '').split(',').filter((id) => PANEL_BY_ID.has(id)).slice(0, 40);
+      const out: Record<string, StrokeData[]> = {};
+      for (const id of ids) {
+        out[id] = [];
+        for (const r of this.sql.exec<{ d: string }>(`SELECT d FROM strokes WHERE panel = ? ORDER BY id`, id)) out[id].push(JSON.parse(r.d));
+      }
+      return json(out, 200, { 'cache-control': 'no-store' });
+    }
+    return json({ error: 'not found' }, 404);
+  }
+
+  accept(user: { uid: string; name: string; photo: string | null }) {
+    const pair = new WebSocketPair();
+    const [client, server] = [pair[0], pair[1]];
+    this.ctx.acceptWebSocket(server);
+    const info: PlayerInfo = { id: crypto.randomUUID().slice(0, 8), uid: user.uid, name: user.name, photo: user.photo };
+    const conn: Conn = { ws: server, info, s: null, lastPersist: 0, bucket: 40, bucketT: Date.now(), doorT: 0 };
+    server.serializeAttachment({ info, s: null } satisfies Attach);
+    const others = [...this.conns.values()];
+    this.conns.set(server, conn);
+    const counts = this.getPanelCounts();
+    const welcome: ServerMsg = {
+      t: 'welcome',
+      you: info,
+      players: others.map((c) => c.info),
+      states: others.filter((c) => c.s).map((c) => [c.info.id, ...c.s!] as PState),
+      doors: Object.fromEntries(this.getDoors()),
+      panels: Object.fromEntries(counts),
+      strokes: this.totalStrokes,
+    };
+    server.send(JSON.stringify(welcome));
+    this.broadcast({ t: 'join', p: info }, server);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  broadcast(msg: ServerMsg, except?: WebSocket) {
+    const s = JSON.stringify(msg);
+    for (const ws of this.conns.keys()) {
+      if (ws === except) continue;
+      try { ws.send(s); } catch { /* closed */ }
+    }
+  }
+
+  scheduleFlush() {
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      if (!this.dirty.size) return;
+      const d: PState[] = [];
+      for (const c of this.dirty) if (c.s) d.push([c.info.id, ...c.s]);
+      this.dirty.clear();
+      this.broadcast({ t: 'ps', d });
+    }, 1000 / 10);
+  }
+
+  async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer) {
+    const conn = this.conns.get(ws);
+    if (!conn || typeof raw !== 'string' || raw.length > 16000) return;
+    let msg: ClientMsg;
+    try { msg = JSON.parse(raw); } catch { return; }
+    const now = Date.now();
+    switch (msg.t) {
+      case 'p': {
+        const s = msg.s;
+        if (!Array.isArray(s) || s.length !== 6 || !s.every((n) => typeof n === 'number' && isFinite(n))) return;
+        const r = (n: number, k = 100) => Math.round(n * k) / k;
+        conn.s = [r(s[0]), r(s[1]), r(s[2]), r(s[3]), r(s[4]), s[5] & 7];
+        this.dirty.add(conn);
+        this.scheduleFlush();
+        if (now - conn.lastPersist > 3000) {
+          conn.lastPersist = now;
+          ws.serializeAttachment({ info: conn.info, s: conn.s } satisfies Attach);
+        }
+        break;
+      }
+      case 's': {
+        // token bucket: 25 strokes/s, burst 50
+        conn.bucket = Math.min(50, conn.bucket + ((now - conn.bucketT) / 1000) * 25);
+        conn.bucketT = now;
+        if (conn.bucket < 1) return;
+        conn.bucket -= 1;
+        const panel = PANEL_BY_ID.get(msg.p);
+        const d = msg.d;
+        if (!panel || !Array.isArray(d) || d.length !== 5) return;
+        const [tool, color, size, seed, pts] = d;
+        if (![0, 1, 2, 3, 4].includes(tool)) return;
+        if (!Number.isInteger(color) || color < 0 || color > 0xffffff) return;
+        if (!Number.isInteger(size) || size < MIN_SIZE || size > MAX_SIZE) return;
+        if (!Number.isInteger(seed)) return;
+        if (!Array.isArray(pts) || pts.length < 2 || pts.length > MAX_STROKE_NUMS || pts.length % 2) return;
+        const W = Math.ceil(panel.w * 100), H = Math.ceil(panel.h * 100);
+        for (let i = 0; i < pts.length; i += 2) {
+          if (!Number.isInteger(pts[i]) || !Number.isInteger(pts[i + 1])) return;
+          if (pts[i] < -50 || pts[i] > W + 50 || pts[i + 1] < -50 || pts[i + 1] > H + 50) return;
+        }
+        const data: StrokeData = [tool, color, size, seed | 0, pts];
+        this.sql.exec(`INSERT INTO strokes (panel, uid, d, t) VALUES (?, ?, ?, ?)`, panel.id, conn.info.uid, JSON.stringify(data), now);
+        const counts = this.getPanelCounts();
+        counts.set(panel.id, (counts.get(panel.id) || 0) + 1);
+        this.totalStrokes++;
+        this.broadcast({ t: 's', p: panel.id, d: data, by: conn.info.id }, ws);
+        break;
+      }
+      case 'door': {
+        if (!DOOR_BY_ID.has(msg.id) || now - conn.doorT < 300) return;
+        conn.doorT = now;
+        const doors = this.getDoors();
+        const open = !doors.get(msg.id);
+        doors.set(msg.id, open);
+        this.sql.exec(`INSERT OR REPLACE INTO doors (id, open) VALUES (?, ?)`, msg.id, open ? 1 : 0);
+        this.broadcast({ t: 'door', id: msg.id, open });
+        break;
+      }
+      case 'ping':
+        ws.send(JSON.stringify({ t: 'pong' } satisfies ServerMsg));
+        break;
+    }
+  }
+
+  drop(ws: WebSocket) {
+    const conn = this.conns.get(ws);
+    if (!conn) return;
+    this.conns.delete(ws);
+    this.dirty.delete(conn);
+    this.broadcast({ t: 'leave', id: conn.info.id });
+  }
+  async webSocketClose(ws: WebSocket, code: number) {
+    this.drop(ws);
+    try { ws.close(code === 1005 ? 1000 : code, 'bye'); } catch { /* already closed */ }
+  }
+  async webSocketError(ws: WebSocket) {
+    this.drop(ws);
+  }
+}

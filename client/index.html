@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#1a1238" />
+    <title>EXISTENZZZ — грибное пространство</title>
+    <meta name="description" content="Коллективное пространство: ходи, рисуй на стенах, слушай генеративную музыку, которая слышит людей рядом." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' shape-rendering='crispEdges'><rect x='3' y='3' width='10' height='4' fill='%23d64646'/><rect x='5' y='2' width='6' height='1' fill='%23d64646'/><rect x='6' y='7' width='4' height='6' fill='%23ece0cc'/><rect x='5' y='4' width='1' height='1' fill='%23fff'/><rect x='10' y='5' width='1' height='1' fill='%23fff'/></svg>" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="game"></div>
+    <div id="crosshair"><div id="cross-ring"></div></div>
+
+    <div id="hud-tl" class="hud">
+      <button id="online" class="chip" title="кто здесь">
+        <span class="pulse"></span><b id="online-n">1</b> <span id="online-word">живых</span>
+      </button>
+      <div id="room-name" class="chip muted"></div>
+      <div id="players" class="panel hidden"></div>
+      <div id="feed"></div>
+    </div>
+
+    <div id="hud-tr" class="hud">
+      <button id="btn-music" class="chip" title="музыка (M)">♪ <span>выкл</span></button>
+      <button id="btn-help" class="chip" title="помощь (H)">?</button>
+    </div>
+
+    <div id="toolbar" class="hud">
+      <div id="tools"></div>
+      <div id="size-wrap">
+        <span id="size-dot"></span>
+        <input id="size" type="range" min="2" max="80" value="12" />
+        <span id="size-label">12</span>
+      </div>
+      <div id="palette"></div>
+    </div>
+
+    <div id="touch" class="hidden">
+      <div id="stick-zone"><div id="stick-base"><div id="stick-knob"></div></div></div>
+      <div id="touch-buttons">
+        <button id="t-draw" class="tbtn" title="рисовать">✎</button>
+        <button id="t-door" class="tbtn" title="дверь">⌂</button>
+        <button id="t-crouch" class="tbtn" title="присесть">▾</button>
+        <button id="t-jump" class="tbtn big" title="прыжок">▲</button>
+      </div>
+    </div>
+
+    <div id="pause" class="overlay hidden">
+      <div class="card">
+        <h2>нажми, чтобы войти в тело</h2>
+        <div class="keys">
+          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> идти</div>
+          <div><kbd>мышь</kbd> смотреть</div>
+          <div><kbd>ЛКМ</kbd> рисовать на стене</div>
+          <div><kbd>Space</kbd> прыжок · <kbd>Shift</kbd>/<kbd>C</kbd> присесть</div>
+          <div><kbd>E</kbd> открыть / закрыть дверь</div>
+          <div><kbd>1</kbd>–<kbd>5</kbd> инструмент · <kbd>колесо</kbd> размер</div>
+          <div><kbd>Q</kbd>/<kbd>R</kbd> цвет · <kbd>Tab</kbd> курсор для палитры</div>
+          <div><kbd>M</kbd> музыка · <kbd>Esc</kbd> пауза</div>
+        </div>
+        <p class="hint">Рисовать можно. Стирать — нельзя. Всё, что ты оставишь, останется.<br />Голубые грибы подбрасывают. В полу бывают дыры. Посмотри наверх.</p>
+        <button id="logout" class="link">выйти из аккаунта</button>
+      </div>
+    </div>
+
+    <div id="login" class="overlay">
+      <div class="card login-card">
+        <div class="logo">
+          <div class="shroom"></div>
+          <h1>EXISTENZZZ</h1>
+        </div>
+        <p class="tag">общее пространство. ходи, рисуй, слушай.<br />рисовать можно — стирать нельзя.</p>
+        <div id="tg-login"></div>
+        <div id="tg-note" class="muted small"></div>
+        <div class="guest">
+          <input id="guest-name" maxlength="24" placeholder="или имя гостя" autocomplete="nickname" />
+          <button id="guest-go" class="btn">войти</button>
+        </div>
+        <p class="muted small">звук включается кнопкой ♪ — генеративный эмбиент, который слышит, сколько людей рядом</p>
+      </div>
+    </div>
+
+    <div id="conn" class="hidden">соединение…</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
