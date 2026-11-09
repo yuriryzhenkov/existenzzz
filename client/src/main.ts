@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import './style.css';
 import qrcode from 'qrcode-generator';
 import { Mirrors } from './mirrors';
+import { Sfx, surfaceAt } from './sfx';
 import { DOORS, ROOMS, insideMirror, levelOfY, raycastPanels, raycastSolid, roomAt } from '../../shared/world';
 import { F_CROUCH, F_DRAWING, F_MOVING, MAX_SIZE, MIN_SIZE, MAX_STROKE_NUMS, type PlayerInfo, type ServerMsg, type StrokeData } from '../../shared/protocol';
 import { buildSky, buildWorld, updateDoors } from './world3d';
@@ -185,6 +186,9 @@ const world = buildWorld(scene);
 const sky = buildSky(scene);
 const paint = new PaintLayer(scene);
 const music = new Music();
+const sfx = new Sfx();
+// audio may only start from a user gesture
+for (const ev of ['pointerdown', 'keydown', 'touchstart'] as const) addEventListener(ev, () => { if (me) sfx.unlock(); }, { passive: true });
 new Visualizer(scene, (b) => music.spectrum(b), () => music.level);
 // your own body: hidden from the first-person camera, shown only while a mirror renders its reflection
 let selfAvatar: Avatar | null = null;
@@ -245,6 +249,7 @@ addEventListener('keydown', (e) => {
   if (e.code === 'Tab') { e.preventDefault(); if (locked) document.exitPointerLock(); }
   if (e.code === 'KeyE') toggleNearestDoor();
   if (e.code === 'KeyM') toggleMusic();
+  if (e.code === 'KeyN') toggleSfx();
   if (e.code === 'KeyH') { if (locked) document.exitPointerLock(); }
   if (e.code >= 'Digit1' && e.code <= 'Digit5') setTool(Number(e.code.slice(5)) - 1);
   if (e.code === 'BracketRight') setSize(size + 2);
@@ -478,6 +483,15 @@ async function toggleMusic(force?: boolean) {
   $('btn-music').querySelector('span')!.textContent = on ? 'вкл' : 'выкл';
 }
 $('btn-music').onclick = () => toggleMusic();
+function toggleSfx(force?: boolean) {
+  const on = force ?? !sfx.enabled;
+  sfx.setEnabled(on);
+  store.set('sfx', on ? '1' : '0');
+  $('btn-sfx').classList.toggle('on', on);
+  $('btn-sfx').querySelector('span')!.textContent = on ? 'вкл' : 'выкл';
+}
+$('btn-sfx').onclick = () => toggleSfx();
+toggleSfx(store.get('sfx') !== '0');
 $('btn-help').onclick = () => { if (IS_TOUCH) alert('Левый круг — идти. Свайп справа — смотреть.\n✎ — режим рисования: води пальцем по стене.\n▲ прыжок · ▾ присесть · ⌂ дверь.\nРисовать можно. Стирать — нельзя.'); else $('pause').classList.remove('hidden'); };
 $('logout').onclick = (e) => { e.stopPropagation(); store.del('token'); store.del('named'); location.reload(); };
 $('rename').onclick = (e) => { e.stopPropagation(); renameFlow(); };
@@ -705,6 +719,41 @@ function updateField(now: number) {
   music.setField({ intensity: Math.max(0, Math.min(1, I)), room: myRoom, level: levelOfY(player.y), voices: voices.slice(0, 6), online });
 }
 
+// ------------------------------------------------------------------ footsteps
+let stepAcc = 0, airTime = 0;
+const remoteSteps = new Map<string, { x: number; y: number; z: number; acc: number }>();
+function footsteps(dt: number, px0: number, pz0: number, wasAir: boolean) {
+  // own steps: every stride of ground travel; crouching is quieter and shorter-strided
+  if (!player.onGround) { airTime += dt; stepAcc = 0.5; }
+  else {
+    if (wasAir && airTime > 0.25) sfx.step(surfaceAt(player.x, player.y, player.z), Math.min(1.2, 0.5 + airTime), 0, 1.8); // landing
+    airTime = 0;
+    stepAcc += Math.hypot(player.x - px0, player.z - pz0);
+    const stride = player.crouching ? 0.55 : 0.75;
+    if (stepAcc >= stride) { stepAcc -= stride; sfx.step(surfaceAt(player.x, player.y, player.z), player.crouching ? 0.4 : 0.85); }
+  }
+  // other players nearby: quiet, positioned
+  const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
+  for (const [id, a] of avatars) {
+    if (!a.hasState) continue;
+    let st = remoteSteps.get(id);
+    if (!st) { st = { x: a.x, y: a.y, z: a.z, acc: 0 }; remoteSteps.set(id, st); }
+    const moved = Math.hypot(a.x - st.x, a.z - st.z);
+    const grounded = Math.abs(a.y - st.y) < 0.02;
+    st.x = a.x; st.y = a.y; st.z = a.z;
+    const dx = a.x - player.x, dz = a.z - player.z;
+    const d = Math.hypot(dx, a.y - player.y, dz);
+    if (d > 15 || !grounded || moved > 2) continue;
+    st.acc += moved;
+    if (st.acc >= 0.75) {
+      st.acc -= 0.75;
+      const pan = (dx * -fz + dz * fx) / (Math.hypot(dx, dz) || 1);
+      sfx.step(surfaceAt(a.x, a.y, a.z), 0.55 * Math.pow(1 - d / 15, 2) * (a.flags & F_CROUCH ? 0.5 : 1), pan);
+    }
+  }
+  for (const id of remoteSteps.keys()) if (!avatars.has(id)) remoteSteps.delete(id);
+}
+
 // ------------------------------------------------------------------ loop
 let last = performance.now();
 let bouncedSeen = 0;
@@ -714,7 +763,9 @@ function frame(now: number) {
   last = now;
   if (!me) return; // no world without a confirmed Telegram session
   readInput();
+  const px0 = player.x, pz0 = player.z, wasAir = !player.onGround;
   player.update(dt, inp);
+  footsteps(dt, px0, pz0, wasAir);
   if (player.bounced !== bouncedSeen) { bouncedSeen = player.bounced; music.event('bounce'); }
   camera.position.set(player.x, player.eyeSmoothY, player.z);
   camera.rotation.set(player.pitch, player.yaw, 0);
@@ -778,7 +829,7 @@ camera.position.set(20, 8, 44);
 
 // debug / automated testing hook
 (window as unknown as { __ez: unknown }).__ez = {
-  player, camera, avatars, paint, music, doorOpen,
+  player, camera, avatars, paint, music, doorOpen, sfx,
   setLocked: (v: boolean) => setLocked(v),
   setMouse: (v: boolean) => { mouseDown = v; },
   toggleNearestDoor, setTool, setColor, setSize,
