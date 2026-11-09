@@ -24,59 +24,140 @@ function makeTex(draw: (ctx: CanvasRenderingContext2D, r: () => number) => void,
 const px = (ctx: CanvasRenderingContext2D, x: number, y: number, c: string) => { ctx.fillStyle = c; ctx.fillRect(x, y, 1, 1); };
 const shade = (base: [number, number, number], k: number) => `rgb(${base.map((v) => Math.max(0, Math.min(255, Math.round(v * k)))).join(',')})`;
 
-export function stoneTex() {
+type RGB = [number, number, number];
+const fill = (ctx: CanvasRenderingContext2D, r: () => number, base: RGB, lo: number, span: number, w = 16, h = 16) => {
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) px(ctx, x, y, shade(base, lo + r() * span));
+};
+
+/** Monolithic concrete: formwork board joints every 25cm + tie holes */
+export function concreteTex() {
   return makeTex((ctx, r) => {
-    const base: [number, number, number] = [214, 206, 222];
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, 0.9 + r() * 0.14));
-    // brick seams
-    for (let y = 0; y < 16; y += 4) for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, 0.8));
-    for (let y = 0; y < 16; y++) {
-      const off = Math.floor(y / 4) % 2 ? 0 : 8;
-      px(ctx, (off + 3) % 16, y, shade(base, 0.82));
-      px(ctx, (off + 11) % 16, y, shade(base, 0.82));
-    }
-  }, 7);
+    const base: RGB = [158, 156, 152];
+    fill(ctx, r, base, 0.9, 0.12);
+    for (let x = 0; x < 16; x++) { px(ctx, x, 0, shade(base, 0.84)); px(ctx, x, 8, shade(base, 0.86)); }
+    px(ctx, 4, 4, shade(base, 0.55)); px(ctx, 12, 12, shade(base, 0.55));
+    for (let i = 0; i < 3; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), shade(base, 0.78));
+  }, 101);
 }
 
-export function floorTex() {
+/** Lime plaster: near-white, very subtle trowel unevenness — the canvas */
+export function plasterTex() {
   return makeTex((ctx, r) => {
-    const base: [number, number, number] = [150, 112, 92];
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, 0.9 + r() * 0.15));
-    for (let y = 0; y < 16; y += 4) for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, 0.72));
-    for (let i = 0; i < 4; i++) px(ctx, Math.floor(r() * 16), i * 4 + 1 + Math.floor(r() * 2), shade(base, 0.7));
-  }, 11);
+    const base: RGB = [236, 232, 224];
+    fill(ctx, r, base, 0.965, 0.045);
+    for (let i = 0; i < 4; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), shade(base, 0.93));
+  }, 102);
+}
+
+/** Red brick, 25x6.5cm bricks with mortar (approximated to the 16px/m grid) */
+export function brickTex() {
+  return makeTex((ctx, r) => {
+    const brick: RGB = [150, 68, 52], mortar: RGB = [196, 186, 170];
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const row = Math.floor(y / 2);
+      const off = row % 2 ? 2 : 0;
+      const isMortarH = y % 2 === 1;
+      const isMortarV = (x + off) % 4 === 3;
+      px(ctx, x, y, isMortarH || isMortarV ? shade(mortar, 0.92 + r() * 0.08) : shade(brick, 0.85 + r() * 0.2));
+    }
+  }, 103);
+}
+
+/** Polished concrete screed (ground floor): lighter, with aggregate specks */
+export function screedTex() {
+  return makeTex((ctx, r) => {
+    const base: RGB = [176, 172, 166];
+    fill(ctx, r, base, 0.94, 0.08);
+    for (let i = 0; i < 10; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), shade(base, r() < 0.5 ? 0.8 : 1.1));
+    for (let x = 0; x < 16; x++) px(ctx, x, 15, shade(base, 0.86)); // expansion joint every metre
+  }, 104);
+}
+
+/** Oak plank parquet: 4 planks per metre, staggered butt joints */
+export function oakTex() {
+  return makeTex((ctx, r) => {
+    const base: RGB = [168, 122, 78];
+    for (let y = 0; y < 16; y++) {
+      const plank = Math.floor(y / 4);
+      const tone = 0.88 + ((plank * 7) % 3) * 0.05;
+      for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, tone + (y % 4 === 1 && r() < 0.3 ? -0.06 : 0) + r() * 0.05));
+      if (y % 4 === 3) for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, 0.66));
+    }
+    for (let p = 0; p < 4; p++) { const x = (p * 5 + 3) % 16; for (let y = p * 4; y < p * 4 + 3; y++) px(ctx, x, y, shade(base, 0.68)); }
+  }, 105);
+}
+
+/** Solid oak for handrails, treads, door leaves: long grain */
+export function woodTex() {
+  return makeTex((ctx, r) => {
+    const base: RGB = [150, 104, 64];
+    for (let y = 0; y < 16; y++) {
+      const g = 0.86 + Math.sin(y * 1.7 + r()) * 0.06;
+      for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, g + r() * 0.04));
+    }
+  }, 106);
+}
+
+/** Soil with moss — where the mycelium came up through the floor */
+export function soilTex() {
+  return makeTex((ctx, r) => {
+    const soil: RGB = [92, 70, 52], moss: RGB = [88, 112, 64];
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const m = r() < 0.45;
+      px(ctx, x, y, shade(m ? moss : soil, 0.82 + r() * 0.25));
+    }
+    for (let i = 0; i < 4; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), '#e8e2d4'); // mycelium threads
+  }, 107);
+}
+
+/** Bitumen roofing with gravel */
+export function roofTex() {
+  return makeTex((ctx, r) => {
+    const base: RGB = [84, 82, 86];
+    fill(ctx, r, base, 0.85, 0.2);
+    for (let i = 0; i < 18; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), shade([150, 144, 136], 0.8 + r() * 0.3));
+  }, 108);
+}
+
+/** Concrete eaten by mycelium: grey with sparse, irregular whitish hyphae (low contrast, no motif) */
+export function myceliumTex() {
+  const t = makeTex((ctx, r) => {
+    const base: RGB = [150, 148, 144];
+    fill(ctx, r, base, 0.86, 0.14, 32, 32);
+    for (let t = 0; t < 7; t++) {
+      let x = r() * 32, y = r() * 32, a = r() * Math.PI * 2;
+      const len = 4 + r() * 10;
+      for (let i = 0; i < len; i++) {
+        px(ctx, Math.floor(x) & 31, Math.floor(y) & 31, shade([226, 222, 212], 0.9 + r() * 0.12));
+        a += (r() - 0.5) * 1.2; x += Math.cos(a); y += Math.sin(a);
+      }
+    }
+  }, 109, 32);
+  t.repeat.set(0.5, 0.5); // 32px over 2m keeps the world-wide 16px/m pixel density
+  return t;
 }
 
 export function grassTex() {
   return makeTex((ctx, r) => {
-    const base: [number, number, number] = [96, 132, 104];
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, 0.82 + r() * 0.3));
-    for (let i = 0; i < 3; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), i ? '#d8c8f0' : '#f4e08a');
+    const base: RGB = [92, 124, 76];
+    fill(ctx, r, base, 0.82, 0.3);
+    for (let i = 0; i < 6; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), shade([120, 156, 90], 0.9 + r() * 0.2));
   }, 21);
 }
 
-export function woodTex() {
-  return makeTex((ctx, r) => {
-    const base: [number, number, number] = [176, 128, 90];
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, 0.85 + ((x * 3 + Math.floor(r() * 2)) % 5) * 0.04));
-    for (let x = 0; x < 16; x += 5) for (let y = 0; y < 16; y++) px(ctx, x, y, shade(base, 0.68));
-  }, 31);
-}
-
+/** Plain oak door leaf: stiles, rails and a recessed panel, brass handle */
 export function doorTex() {
   const c = document.createElement('canvas');
   c.width = 32; c.height = 48;
   const ctx = c.getContext('2d')!;
   const r = rng(41);
-  const base: [number, number, number] = [130, 86, 120];
-  for (let y = 0; y < 48; y++) for (let x = 0; x < 32; x++) px(ctx, x, y, shade(base, 0.85 + ((x >> 2) % 2) * 0.08 + r() * 0.06));
-  ctx.fillStyle = shade(base, 0.6);
-  ctx.fillRect(0, 0, 32, 2); ctx.fillRect(0, 46, 32, 2); ctx.fillRect(0, 0, 2, 48); ctx.fillRect(30, 0, 2, 48);
-  // little mushroom emblem
-  ctx.fillStyle = '#e8d8c0'; ctx.fillRect(14, 20, 4, 8);
-  ctx.fillStyle = '#d0504a'; ctx.fillRect(10, 14, 12, 6); ctx.fillRect(12, 12, 8, 2);
-  ctx.fillStyle = '#fff'; px(ctx, 13, 15, '#fff'); px(ctx, 18, 16, '#fff'); px(ctx, 15, 13, '#fff');
-  ctx.fillStyle = '#f2c94c'; ctx.fillRect(25, 24, 2, 3);
+  const base: RGB = [140, 98, 60];
+  for (let y = 0; y < 48; y++) for (let x = 0; x < 32; x++) px(ctx, x, y, shade(base, 0.88 + Math.sin(x * 1.3) * 0.03 + r() * 0.05));
+  ctx.strokeStyle = shade(base, 0.68);
+  ctx.lineWidth = 1;
+  ctx.strokeRect(5.5, 5.5, 21, 16);
+  ctx.strokeRect(5.5, 26.5, 21, 16);
+  ctx.fillStyle = '#c9a24a'; ctx.fillRect(27, 23, 2, 3);
   const t = new THREE.CanvasTexture(c);
   t.magFilter = THREE.NearestFilter;
   t.minFilter = THREE.NearestFilter;

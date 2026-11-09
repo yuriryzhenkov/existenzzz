@@ -121,14 +121,15 @@ export const isStair = (c: string | null) => c !== null && c >= '0' && c <= '9';
 export const stairH = (c: string) => (c.charCodeAt(0) - 48 + 1) * 0.5;
 
 // ---------- Giant mushrooms (extra solid objects) ----------
-export interface Box { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number; bounce?: number; kind?: string; hue?: number }
+export interface Box { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number; bounce?: number; kind?: string; species?: number }
 
 export const MUSHROOM_STEM: Box = { x0: 19.2, y0: 0, z0: 19.2, x1: 21.8, y1: 10.5, z1: 21.8, kind: 'stem' };
 export const MUSHROOM_CAP: Box = { x0: 17, y0: 10.5, z0: 17, x1: 24, y1: 11.4, z1: 24, kind: 'cap' };
 export const MUSHROOM_TOP: Box = { x0: 18, y0: 11.4, z0: 18, x1: 23, y1: 11.9, z1: 23, kind: 'cap' };
 
 // Outdoor giant mushrooms on the meadow (deterministic)
-export interface Shroom { x: number; z: number; h: number; r: number; hue: number }
+/** species: 0 fly agaric, 1 porcini, 2 chanterelle, 3 russula, 4 parasol */
+export interface Shroom { x: number; z: number; h: number; r: number; species: number }
 export const MEADOW_SHROOMS: Shroom[] = (() => {
   const out: Shroom[] = [];
   let s = 1337;
@@ -136,7 +137,7 @@ export const MEADOW_SHROOMS: Shroom[] = (() => {
   for (let i = 0; i < 26; i++) {
     const a = rnd() * Math.PI * 2;
     const d = 30 + rnd() * 26;
-    out.push({ x: CENTER + Math.cos(a) * d, z: CENTER + Math.sin(a) * d, h: 3 + rnd() * 9, r: 1.5 + rnd() * 3.5, hue: rnd() });
+    out.push({ x: CENTER + Math.cos(a) * d, z: CENTER + Math.sin(a) * d, h: 3 + rnd() * 9, r: 1.5 + rnd() * 3.5, species: Math.floor(rnd() * 5) });
   }
   return out;
 })();
@@ -146,9 +147,9 @@ export const STATIC_BOXES: Box[] = [
   MUSHROOM_CAP,
   MUSHROOM_TOP,
   ...MEADOW_SHROOMS.flatMap((m): Box[] => [
-    { x0: m.x - 0.4 - m.r * 0.15, y0: 0, z0: m.z - 0.4 - m.r * 0.15, x1: m.x + 0.4 + m.r * 0.15, y1: m.h, z1: m.z + 0.4 + m.r * 0.15, kind: 'stem' },
-    { x0: m.x - m.r, y0: m.h, z0: m.z - m.r, x1: m.x + m.r, y1: m.h + 0.8, z1: m.z + m.r, kind: 'cap', hue: m.hue },
-    { x0: m.x - m.r * 0.6, y0: m.h + 0.8, z0: m.z - m.r * 0.6, x1: m.x + m.r * 0.6, y1: m.h + 1.3, z1: m.z + m.r * 0.6, kind: 'cap', hue: m.hue, bounce: m.h < 7 ? 15 : 0 },
+    { x0: m.x - 0.4 - m.r * 0.15, y0: 0, z0: m.z - 0.4 - m.r * 0.15, x1: m.x + 0.4 + m.r * 0.15, y1: m.h, z1: m.z + 0.4 + m.r * 0.15, kind: 'stem', species: m.species },
+    { x0: m.x - m.r, y0: m.h, z0: m.z - m.r, x1: m.x + m.r, y1: m.h + 0.8, z1: m.z + m.r, kind: 'cap', species: m.species },
+    { x0: m.x - m.r * 0.6, y0: m.h + 0.8, z0: m.z - m.r * 0.6, x1: m.x + m.r * 0.6, y1: m.h + 1.3, z1: m.z + m.r * 0.6, kind: 'cap', species: m.species, bounce: m.h < 7 ? 15 : 0 },
   ]),
 ];
 

@@ -114,7 +114,7 @@ const FOG = new THREE.Color('#6a4a86');
 scene.fog = new THREE.Fog(FOG, 30, 140);
 const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.05, 600);
 camera.rotation.order = 'YXZ';
-scene.add(new THREE.HemisphereLight(0xe8dcff, 0x9a7c92, 1.55));
+scene.add(new THREE.HemisphereLight(0xe4ddf0, 0xa69a8e, 1.5) /* sky: dusk; ground: bounce light, slightly warm from oak floors but mostly neutral (concrete, plaster) */);
 const sun = new THREE.DirectionalLight(0xffe2c8, 1.1);
 sun.position.set(30, 60, 10);
 scene.add(sun);

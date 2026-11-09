@@ -3,7 +3,9 @@ import {
   CENTER, DOORS, DOOR_H, DOOR_THICK, FLOOR_H, LEVELS, LEVEL_GRIDS, PAD_H, RAIL_H, SIZE, SLAB, STATIC_BOXES, WALL_H, WIN_HI, WIN_LO,
   cellAt, isStair, stairH, type Door,
 } from '../../shared/world';
-import { capTex, doorTex, floorTex, gillTex, grassTex, stemTex, stoneTex, woodTex } from './textures';
+import { brickTex, capTex, concreteTex, doorTex, gillTex, grassTex, myceliumTex, oakTex, plasterTex, roofTex, screedTex, soilTex, stemTex, woodTex } from './textures';
+
+const shadeHex = (c: [number, number, number], k: number) => '#' + c.map((v) => Math.min(255, Math.round(v * k)).toString(16).padStart(2, '0')).join('');
 
 type V3 = [number, number, number];
 
@@ -52,72 +54,102 @@ class Mesher {
   }
 }
 
-const LEVEL_TINT: V3[] = [[0.95, 0.9, 1.0], [0.86, 0.98, 0.92], [1.0, 0.9, 0.84]];
-function cellTint(base: V3, x: number, z: number): V3 {
-  const n = ((x * 73856093) ^ (z * 19349663)) & 255;
-  const k = 0.95 + (n / 255) * 0.08;
-  return [base[0] * k, base[1] * k, base[2] * k];
-}
+// Materials follow docs/MATERIALS.md: a real concrete/brick/plaster/oak building that mycelium grew through.
+const W: V3 = [1, 1, 1];
+const inAtrium = (x: number, z: number) => x >= 15 && x <= 25 && z >= 15 && z <= 25;
+
+// real species: cap colour, spot colour (null = none), stem tint
+const SPECIES: { cap: [number, number, number]; spot: string | null; stem: V3 }[] = [
+  { cap: [196, 46, 38], spot: '#f4efe4', stem: [1, 1, 0.97] }, // fly agaric
+  { cap: [116, 72, 40], spot: null, stem: [0.92, 0.86, 0.74] }, // porcini
+  { cap: [232, 156, 46], spot: null, stem: [1, 0.78, 0.45] }, // chanterelle
+  { cap: [184, 70, 92], spot: null, stem: [1, 0.98, 0.96] }, // russula
+  { cap: [214, 196, 168], spot: '#7a5a3e', stem: [0.95, 0.92, 0.86] }, // parasol (brown scales)
+];
 
 export interface DoorView { door: Door; pivot: THREE.Object3D; angle: number; target: number }
 
 export function buildWorld(scene: THREE.Scene) {
   const lambert = (map: THREE.Texture, extra: THREE.MeshLambertMaterialParameters = {}) => new THREE.MeshLambertMaterial({ map, vertexColors: true, ...extra });
   const mats = {
-    wall: lambert(stoneTex()),
-    floor: lambert(floorTex()),
+    concrete: lambert(concreteTex()),
+    plaster: lambert(plasterTex()),
+    brick: lambert(brickTex()),
+    screed: lambert(screedTex()),
+    oak: lambert(oakTex()),
     wood: lambert(woodTex()),
+    soil: lambert(soilTex()),
+    roof: lambert(roofTex()),
+    mycelium: lambert(myceliumTex()),
     grass: lambert(grassTex(), { polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2 }),
-    stem: lambert(stemTex(), { emissive: new THREE.Color(0x3a3026), emissiveIntensity: 0.6 }),
-    cap: lambert(capTex([214, 70, 70])),
-    capWhite: lambert(capTex([255, 255, 255], '#ffffff', 52)),
+    stem: lambert(stemTex()),
     gill: lambert(gillTex()),
-    pad: lambert(capTex([90, 200, 230], '#e8fbff', 53), { emissive: new THREE.Color(0x1b6f8a), emissiveIntensity: 0.6 }),
+    // bioluminescent mushrooms glow green, like Mycena / Panellus
+    pad: lambert(capTex([150, 230, 150], '#e8ffe0', 53), { emissive: new THREE.Color(0x3fbf5a), emissiveIntensity: 0.55 }),
+    sp0: lambert(capTex(SPECIES[0].cap, SPECIES[0].spot!, 60)),
+    sp1: lambert(capTex(SPECIES[1].cap, shadeHex(SPECIES[1].cap, 0.9), 61)),
+    sp2: lambert(capTex(SPECIES[2].cap, shadeHex(SPECIES[2].cap, 1.06), 62)),
+    sp3: lambert(capTex(SPECIES[3].cap, shadeHex(SPECIES[3].cap, 1.08), 63)),
+    sp4: lambert(capTex(SPECIES[4].cap, SPECIES[4].spot!, 64)),
   };
   const M = Object.fromEntries(Object.keys(mats).map((k) => [k, new Mesher()])) as Record<keyof typeof mats, Mesher>;
   const isWallish = (c: string | null) => c === '#';
 
+  /** emit wall-ish faces: faces looking outside the building are brick, inside plaster */
+  const wallFaces = (L: number, x: number, z: number, box: { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number }, faces: string, ao: number) => {
+    for (const f of faces) {
+      const d = f === 'X' ? [1, 0] : f === 'x' ? [-1, 0] : f === 'Z' ? [0, 1] : f === 'z' ? [0, -1] : null;
+      if (!d) { M.concrete.box(box, f, W, ao); continue; } // sills & lintels: precast concrete
+      const outside = cellAt(L, x + d[0], z + d[1]) === null;
+      (outside ? M.brick : M.plaster).box(box, f, W, outside ? 0.85 : ao);
+    }
+  };
+
   for (let L = 0; L < LEVELS; L++) {
     const base = L * FLOOR_H;
-    const tint = LEVEL_TINT[Math.min(L, 2)];
     const g = LEVEL_GRIDS[L];
-    // ---- slab tops & bottoms, merged per row ----
+    // ---- slab tops (floor finish) & bottoms (bare concrete ceiling), merged per row & finish ----
+    const finish = (x: number, z: number): Mesher => {
+      if (L === LEVELS - 1) return M.roof;
+      if (L === 0) return inAtrium(x, z) ? M.soil : M.screed;
+      return M.oak;
+    };
     for (let z = 0; z < SIZE; z++) {
       let run = -1;
+      let runM: Mesher | null = null;
       for (let x = 0; x <= SIZE; x++) {
         const solid = x < SIZE && g[z][x] !== 'o';
-        if (solid && run < 0) run = x;
-        if (!solid && run >= 0) {
+        const m = solid ? finish(x, z) : null;
+        if (run >= 0 && (!solid || m !== runM)) {
           const box = { x0: run, y0: base - SLAB, z0: z, x1: x, y1: base, z1: z + 1 };
-          const mesher = L === LEVELS - 1 ? M.wall : M.floor;
-          mesher.box(box, 'Y', L === LEVELS - 1 ? [0.82, 0.8, 0.9] : [1, 1, 1]);
-          if (L > 0) M.wall.box(box, 'y', [0.9, 0.88, 0.95]);
+          runM!.box(box, 'Y', W);
+          if (L > 0) M.concrete.box(box, 'y', [1.3, 1.3, 1.3]); // compensate the darker underside so concrete reads as grey
           run = -1;
         }
+        if (solid && run < 0) { run = x; runM = m; }
       }
       if (L > 0) for (let x = 0; x < SIZE; x++) {
         if (g[z][x] === 'o') continue;
         const b = { x0: x, y0: base - SLAB, z0: z, x1: x + 1, y1: base, z1: z + 1 };
-        let f = '';
-        if ((cellAt(L, x + 1, z) ?? 'o') === 'o') f += 'X';
-        if ((cellAt(L, x - 1, z) ?? 'o') === 'o') f += 'x';
-        if ((cellAt(L, x, z + 1) ?? 'o') === 'o') f += 'Z';
-        if ((cellAt(L, x, z - 1) ?? 'o') === 'o') f += 'z';
-        if (f) M.wall.box(b, f, [0.75, 0.72, 0.8], 1);
+        // slab edges: at holes they are eaten by mycelium; on the facade it is the concrete slab band
+        for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
+          const n = cellAt(L, x + dx, z + dz);
+          if (n === 'o') M.mycelium.box(b, f, W, 1);
+          else if (n === null) M.concrete.box(b, f, W, 1);
+        }
       }
     }
     // ---- cells ----
     for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
       const c = g[z][x];
       const nb = (dx: number, dz: number) => cellAt(L, x + dx, z + dz);
-      const t = cellTint(tint, x, z);
       if (c === '#') {
         let f = '';
         if (!isWallish(nb(1, 0))) f += 'X';
         if (!isWallish(nb(-1, 0))) f += 'x';
         if (!isWallish(nb(0, 1))) f += 'Z';
         if (!isWallish(nb(0, -1))) f += 'z';
-        M.wall.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f, t, 0.72);
+        wallFaces(L, x, z, { x0: x, y0: base, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f, 0.8);
       } else if (c === 'w' || c === 'D') {
         const sideCull = (n: string | null) => n === '#' || n === 'w' || n === 'D';
         let f = '';
@@ -126,38 +158,46 @@ export function buildWorld(scene: THREE.Scene) {
         if (!sideCull(nb(0, 1))) f += 'Z';
         if (!sideCull(nb(0, -1))) f += 'z';
         if (c === 'w') {
-          M.wall.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + WIN_LO, z1: z + 1 }, f + 'Y', t, 0.72);
-          M.wall.box({ x0: x, y0: base + WIN_HI, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f + 'y', t, 0.95);
+          wallFaces(L, x, z, { x0: x, y0: base, z0: z, x1: x + 1, y1: base + WIN_LO, z1: z + 1 }, f + 'Y', 0.8);
+          wallFaces(L, x, z, { x0: x, y0: base + WIN_HI, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f + 'y', 1);
         } else {
-          M.wall.box({ x0: x, y0: base + DOOR_H, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f + 'y', t, 0.95);
+          wallFaces(L, x, z, { x0: x, y0: base + DOOR_H, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f + 'y', 1);
         }
       } else if (c === 'r') {
-        let f = 'Y';
+        let f = '';
         if (nb(1, 0) !== 'r') f += 'X';
         if (nb(-1, 0) !== 'r') f += 'x';
         if (nb(0, 1) !== 'r') f += 'Z';
         if (nb(0, -1) !== 'r') f += 'z';
-        M.wood.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1 }, f, [0.95, 0.85, 0.85], 0.75);
+        const perimeter = L === LEVELS - 1 && (x === 0 || z === 0 || x === SIZE - 1 || z === SIZE - 1);
+        if (perimeter) {
+          // roof parapet: the brick facade continues above the roof
+          M.brick.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1 }, f + 'Y', W, 0.8);
+        } else {
+          // gallery balustrade: concrete upstand (part of the slab) + oak handrail where hands touch
+          M.concrete.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H - 0.12, z1: z + 1 }, f, W, 0.8);
+          M.wood.box({ x0: x, y0: base + RAIL_H - 0.12, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1 }, f + 'Y', W, 0.95);
+        }
       } else if (isStair(c)) {
-        M.wood.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + stairH(c), z1: z + 1 }, 'XxZzY', [1, 0.95, 0.9], 0.7);
+        // concrete flight, oak treads
+        const h = base + stairH(c);
+        M.concrete.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: h - 0.05, z1: z + 1 }, 'XxZz', W, 0.8);
+        M.wood.box({ x0: x, y0: h - 0.05, z0: z, x1: x + 1, y1: h, z1: z + 1 }, 'XxZzY', W, 1);
       } else if (c === 'b' || c === 'B') {
         const big = c === 'B';
-        M.stem.box({ x0: x + 0.38, y0: base, z0: z + 0.38, x1: x + 0.62, y1: base + 0.3, z1: z + 0.62 }, 'XxZz', [1, 1, 1]);
-        M.pad.box({ x0: x + (big ? -0.1 : 0), y0: base + 0.3, z0: z + (big ? -0.1 : 0), x1: x + 1 + (big ? 0.1 : 0), y1: base + PAD_H, z1: z + 1 + (big ? 0.1 : 0) }, 'XxZzYy', big ? [1, 0.75, 1] : [1, 1, 1], 0.85);
+        M.stem.box({ x0: x + 0.38, y0: base, z0: z + 0.38, x1: x + 0.62, y1: base + 0.3, z1: z + 0.62 }, 'XxZz', W);
+        M.pad.box({ x0: x + (big ? -0.1 : 0), y0: base + 0.3, z0: z + (big ? -0.1 : 0), x1: x + 1 + (big ? 0.1 : 0), y1: base + PAD_H, z1: z + 1 + (big ? 0.1 : 0) }, 'XxZzYy', W, 0.85);
       }
     }
   }
 
-  // ---- mushrooms ----
+  // ---- mushrooms: the giant one in the atrium is a fly agaric; meadow ones are real species ----
   for (const b of STATIC_BOXES) {
-    if (b.kind === 'stem') M.stem.box(b, 'XxZz', [1, 1, 1], 0.7);
+    const sp = b.species ?? 0;
+    if (b.kind === 'stem') M.stem.box(b, 'XxZz', SPECIES[sp].stem, 0.75);
     else if (b.kind === 'cap') {
-      const isMeadow = b.hue !== undefined;
-      if (isMeadow) {
-        const col = new THREE.Color().setHSL(b.hue!, 0.55, 0.55);
-        M.capWhite.box(b, 'XxZzY', [col.r, col.g, col.b], 0.85);
-      } else M.cap.box(b, 'XxZzY', [1, 1, 1], 0.85);
-      M.gill.box(b, 'y', [1, 1, 1]);
+      M[`sp${sp}` as 'sp0'].box(b, 'XxZzY', W, 0.85);
+      M.gill.box(b, 'y', W);
     }
   }
 
