@@ -3,7 +3,7 @@ main = "src/index.ts"
 compatibility_date = "2026-10-01"
 
 [vars]
-BOT_USERNAME = ""
+BOT_USERNAME = "existenzzz_bot"
 
 [[durable_objects.bindings]]
 name = "WORLD"
