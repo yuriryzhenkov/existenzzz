@@ -122,3 +122,6 @@ body.touch #pause { display: none !important; }
 #name-dialog { z-index: 30; }
 #name-title { margin-top: 0; }
 .pl .ren { margin-left: auto; background: none; border: 0; color: var(--muted); font-size: 12px; text-decoration: underline; padding: 0 2px; }
+
+/* nothing of the world is shown or usable until the server confirmed a Telegram session */
+body:not(.authed) #game, body:not(.authed) #crosshair, body:not(.authed) .hud, body:not(.authed) #touch, body:not(.authed) #pause { display: none !important; }

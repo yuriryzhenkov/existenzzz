@@ -78,7 +78,18 @@ async function getToken(): Promise<string> {
   }
   // 2) saved session
   const saved = store.get('token');
-  if (saved) return saved;
+  if (saved) {
+    try {
+      const r = await fetch(`${API}/api/me?token=${encodeURIComponent(saved)}`);
+      if (r.ok) return saved;
+      if (r.status === 401) store.del('token');
+    } catch {
+      // server unreachable: do not let anyone in offline
+      $('login').classList.remove('hidden');
+      $('login-status').textContent = 'сервер недоступен, обнови страницу позже';
+      return new Promise<string>(() => {});
+    }
+  }
 
   // 3) bot login
   $('login').classList.remove('hidden');
@@ -583,6 +594,7 @@ function onMsg(m: ServerMsg) {
   switch (m.t) {
     case 'welcome': {
       me = m.you;
+      document.body.classList.add('authed');
       if (selfAvatar) { scene.remove(selfAvatar.root); selfAvatar.dispose(); }
       selfAvatar = new Avatar(me, API);
       selfAvatar.root.visible = false;
@@ -700,6 +712,7 @@ function frame(now: number) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
+  if (!me) return; // no world without a confirmed Telegram session
   readInput();
   player.update(dt, inp);
   if (player.bounced !== bouncedSeen) { bouncedSeen = player.bounced; music.event('bounce'); }
@@ -738,10 +751,10 @@ camera.position.set(20, 8, 44);
   net.onStatus = (s) => {
     $('conn').classList.toggle('hidden', s === 'open');
     if (s === 'closed') $('conn').textContent = 'соединение потеряно… переподключаюсь';
-    if (s === 'closed' && !me && store.get('token')) {
-      // token rejected (expired / old guest session) -> back to login
+    if (s === 'closed' && !me) {
+      // session rejected by the server -> back to the Telegram login
       authFails++;
-      if (authFails >= 3) { store.del('token'); location.reload(); }
+      if (authFails >= 2) { net?.close(); store.del('token'); location.reload(); }
     }
   };
   $('conn').classList.remove('hidden');

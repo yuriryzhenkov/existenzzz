@@ -42,6 +42,7 @@ async function verifySession(env: Env, token: string) {
   if (want !== sig) return null;
   const data = JSON.parse(unb64u(body));
   if (data.exp < Date.now()) return null;
+  if (typeof data.uid !== 'string' || !/^tg:\d+$/.test(data.uid)) return null; // Telegram accounts only
   return data as { uid: string; name: string; photo: string | null };
 }
 
@@ -105,6 +106,11 @@ export default {
         const user = await verifyWebApp(env, initData);
         if (!user) return json({ error: 'bad webapp auth' }, 401);
         return json({ token: await signSession(env, user), user });
+      }
+      case '/api/me': {
+        const user = await verifySession(env, url.searchParams.get('token') || '');
+        if (!user) return json({ error: 'telegram login required' }, 401);
+        return json({ user });
       }
       case '/api/login/start': {
         const r = await world().fetch(new Request('https://world/login/start', { method: 'POST' }));
