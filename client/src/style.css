@@ -105,6 +105,9 @@ body.touch #toolbar { bottom: calc(8px + var(--safe-b)); padding: 6px; gap: 6px;
 body.touch .tool { width: 34px; height: 34px; }
 body.touch .tool .k { display: none; }
 body.touch #size { width: 70px; }
+body.touch #size-dot { width: 26px !important; height: 26px !important; border: 2px solid #fff; cursor: pointer; }
+body.touch #palette:not(.hidden) { position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); padding: 8px; border-radius: 10px; background: var(--chip); border: 1px solid var(--line); }
+body.touch #toolbar { position: fixed; }
 body.touch #palette { grid-template-columns: repeat(9, 20px); }
 body.touch .sw { width: 20px; height: 20px; }
 body.touch #pause { display: none !important; }

@@ -321,6 +321,12 @@ function buildToolbar() {
   // keep toolbar clicks from re-locking / drawing
   $('toolbar').addEventListener('mousedown', (e) => e.stopPropagation());
   setTool(tool); setColor(color); setSize(size);
+  if (IS_TOUCH) {
+    // compact toolbar on phones: palette opens from the colour dot
+    pal.classList.add('hidden');
+    $('size-dot').addEventListener('click', () => pal.classList.toggle('hidden'));
+    pal.addEventListener('click', (e) => { if ((e.target as HTMLElement).classList.contains('sw') && !(e.target as HTMLElement).classList.contains('custom')) pal.classList.add('hidden'); });
+  }
 }
 function setTool(t: number) {
   tool = Math.max(0, Math.min(4, t)); store.set('tool', String(tool));
