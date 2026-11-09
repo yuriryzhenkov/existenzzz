@@ -73,6 +73,15 @@ async function verifyWebApp(env: Env, initData: string) {
   return { uid: 'tg:' + u.id, name: cleanName(name), photo: u.photo_url || null };
 }
 
+const GAME_URL = 'https://yuriryzhenkov.github.io/existenzzz/';
+async function webhookSecret(env: Env) {
+  return hex(await hmac(enc.encode(secretOf(env)), 'tg-webhook')).slice(0, 40);
+}
+async function tg(env: Env, method: string, body: unknown) {
+  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  return r.json() as Promise<{ ok: boolean; result?: any; description?: string }>;
+}
+
 // ---------------- Worker entry ----------------
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -97,7 +106,65 @@ export default {
         if (!user) return json({ error: 'bad webapp auth' }, 401);
         return json({ token: await signSession(env, user), user });
       }
+      case '/api/login/start': {
+        const r = await world().fetch(new Request('https://world/login/start', { method: 'POST' }));
+        const { code } = (await r.json()) as { code: string };
+        const bot = env.BOT_USERNAME;
+        return json({ code, url: `https://t.me/${bot}?start=login_${code}`, tg: `tg://resolve?domain=${bot}&start=login_${code}` });
+      }
+      case '/api/login/poll': {
+        const code = (url.searchParams.get('code') || '').replace(/[^a-z0-9]/gi, '');
+        const r = await world().fetch(new Request('https://world/login/poll?code=' + code));
+        const data = (await r.json()) as { status: string; user?: { uid: string; name: string; photo: string | null } };
+        if (data.status === 'ok' && data.user) return json({ status: 'ok', token: await signSession(env, data.user), user: data.user });
+        return json({ status: data.status });
+      }
+      case '/api/tg/setup': {
+        if (!env.BOT_TOKEN) return json({ error: 'no bot' }, 400);
+        const res = await tg(env, 'setWebhook', { url: url.origin + '/api/tg/webhook', secret_token: await webhookSecret(env), allowed_updates: ['message'], drop_pending_updates: true });
+        return json(res);
+      }
+      case '/api/tg/webhook': {
+        if (req.headers.get('X-Telegram-Bot-Api-Secret-Token') !== (await webhookSecret(env))) return new Response('forbidden', { status: 403 });
+        const upd = (await req.json()) as { message?: { text?: string; chat: { id: number }; from?: { id: number; first_name?: string; last_name?: string; username?: string } } };
+        const m = upd.message;
+        if (!m?.from || !m.text) return new Response('ok');
+        const payload = m.text.startsWith('/start') ? m.text.split(' ')[1] || '' : '';
+        const playButtons = { inline_keyboard: [[{ text: '🍄 Играть в Telegram', web_app: { url: GAME_URL } }], [{ text: 'Открыть в браузере', url: GAME_URL }]] };
+        if (payload.startsWith('login_')) {
+          const f = m.from;
+          const name = cleanName([f.first_name, f.last_name].filter(Boolean).join(' ') || f.username || '');
+          const user = { uid: 'tg:' + f.id, name, photo: '/api/avatar?tg=' + f.id };
+          const r = await world().fetch(new Request('https://world/login/confirm', { method: 'POST', body: JSON.stringify({ code: payload.slice(6), user }) }));
+          const ok = r.ok;
+          ctx.waitUntil(tg(env, 'sendMessage', {
+            chat_id: m.chat.id,
+            text: ok ? `Готово, ${name} ✨\nВозвращайся в игру — ты уже внутри.` : 'Эта ссылка для входа устарела. Обнови страницу игры и попробуй ещё раз.',
+            reply_markup: ok ? undefined : playButtons,
+          }));
+        } else {
+          ctx.waitUntil(tg(env, 'sendMessage', { chat_id: m.chat.id, text: 'EXISTENZZZ — общее грибное пространство. Ходи, рисуй на стенах, слушай музыку, которая слышит людей рядом.', reply_markup: playButtons }));
+        }
+        return new Response('ok');
+      }
       case '/api/avatar': {
+        const tgId = (url.searchParams.get('tg') || '').replace(/[^0-9]/g, '');
+        if (tgId) {
+          const cache = caches.default;
+          const key = new Request(url.toString());
+          const hit = await cache.match(key);
+          if (hit) return hit;
+          if (!env.BOT_TOKEN) return json({ error: 'no bot' }, 404);
+          const photos = await tg(env, 'getUserProfilePhotos', { user_id: Number(tgId), limit: 1 });
+          const sizes = photos.result?.photos?.[0] as { file_id: string; width: number }[] | undefined;
+          if (!sizes?.length) return json({ error: 'no photo' }, 404, { 'cache-control': 'public, max-age=3600' });
+          const file = await tg(env, 'getFile', { file_id: sizes[0].file_id });
+          if (!file.result?.file_path) return json({ error: 'no file' }, 404);
+          const img = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${file.result.file_path}`);
+          const res = new Response(img.body, { headers: { 'content-type': 'image/jpeg', 'cache-control': 'public, max-age=86400', ...CORS } });
+          ctx.waitUntil(cache.put(key, res.clone()));
+          return res;
+        }
         const u = url.searchParams.get('u') || '';
         let target: URL;
         try { target = new URL(u); } catch { return json({ error: 'bad url' }, 400); }
@@ -117,11 +184,7 @@ export default {
         const token = url.searchParams.get('token');
         let user: { uid: string; name: string; photo: string | null } | null = null;
         if (token) user = await verifySession(env, token);
-        if (!user) {
-          const gid = (url.searchParams.get('gid') || '').replace(/[^a-z0-9]/gi, '').slice(0, 16);
-          if (!gid) return new Response('no identity', { status: 400 });
-          user = { uid: 'g:' + gid, name: cleanName(url.searchParams.get('name') || ''), photo: null };
-        }
+        if (!user) return new Response('login required', { status: 401 });
         const fwd = new URL('https://world/ws');
         fwd.searchParams.set('u', JSON.stringify(user));
         return world().fetch(new Request(fwd, req));
@@ -165,6 +228,8 @@ export class World extends DurableObject<Env> {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS strokes (id INTEGER PRIMARY KEY AUTOINCREMENT, panel TEXT NOT NULL, uid TEXT NOT NULL, d TEXT NOT NULL, t INTEGER NOT NULL)`);
     this.sql.exec(`CREATE INDEX IF NOT EXISTS strokes_panel ON strokes(panel, id)`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS doors (id TEXT PRIMARY KEY, open INTEGER NOT NULL)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS logins (code TEXT PRIMARY KEY, created INTEGER NOT NULL, user TEXT)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, name TEXT NOT NULL)`);
     // restore connections after hibernation
     for (const ws of ctx.getWebSockets()) {
       const a = ws.deserializeAttachment() as Attach | null;
@@ -195,6 +260,28 @@ export class World extends DurableObject<Env> {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === '/ws') return this.accept(JSON.parse(url.searchParams.get('u')!));
+    if (url.pathname === '/login/start') {
+      const now = Date.now();
+      this.sql.exec(`DELETE FROM logins WHERE created < ?`, now - 15 * 60 * 1000);
+      const code = [...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(36).padStart(2, '0')).join('').slice(0, 20);
+      this.sql.exec(`INSERT INTO logins (code, created, user) VALUES (?, ?, NULL)`, code, now);
+      return json({ code });
+    }
+    if (url.pathname === '/login/confirm') {
+      const { code, user } = (await req.json()) as { code: string; user: unknown };
+      const row = [...this.sql.exec<{ created: number }>(`SELECT created FROM logins WHERE code = ?`, code)][0];
+      if (!row || Date.now() - row.created > 10 * 60 * 1000) return json({ error: 'expired' }, 410);
+      this.sql.exec(`UPDATE logins SET user = ? WHERE code = ?`, JSON.stringify(user), code);
+      return json({ ok: true });
+    }
+    if (url.pathname === '/login/poll') {
+      const code = url.searchParams.get('code') || '';
+      const row = [...this.sql.exec<{ created: number; user: string | null }>(`SELECT created, user FROM logins WHERE code = ?`, code)][0];
+      if (!row || Date.now() - row.created > 10 * 60 * 1000) return json({ status: 'expired' });
+      if (!row.user) return json({ status: 'pending' });
+      this.sql.exec(`DELETE FROM logins WHERE code = ?`, code);
+      return json({ status: 'ok', user: JSON.parse(row.user) });
+    }
     if (url.pathname === '/api/stats') {
       this.getPanelCounts();
       return json({ online: this.conns.size, strokes: this.totalStrokes, players: [...this.conns.values()].map((c) => c.info.name) });
@@ -215,7 +302,8 @@ export class World extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server);
-    const info: PlayerInfo = { id: crypto.randomUUID().slice(0, 8), uid: user.uid, name: user.name, photo: user.photo };
+    const custom = [...this.sql.exec<{ name: string }>(`SELECT name FROM users WHERE uid = ?`, user.uid)][0];
+    const info: PlayerInfo = { id: crypto.randomUUID().slice(0, 8), uid: user.uid, name: custom?.name || user.name, photo: user.photo };
     const conn: Conn = { ws: server, info, s: null, lastPersist: 0, bucket: 40, bucketT: Date.now(), doorT: 0 };
     server.serializeAttachment({ info, s: null } satisfies Attach);
     const others = [...this.conns.values()];
@@ -311,6 +399,19 @@ export class World extends DurableObject<Env> {
         doors.set(msg.id, open);
         this.sql.exec(`INSERT OR REPLACE INTO doors (id, open) VALUES (?, ?)`, msg.id, open ? 1 : 0);
         this.broadcast({ t: 'door', id: msg.id, open });
+        break;
+      }
+      case 'rename': {
+        const name = cleanName(typeof msg.name === 'string' ? msg.name : '');
+        if (now - conn.doorT < 1000 || name === conn.info.name) return;
+        conn.doorT = now;
+        this.sql.exec(`INSERT OR REPLACE INTO users (uid, name) VALUES (?, ?)`, conn.info.uid, name);
+        // update every connection of this user (several tabs)
+        for (const c of this.conns.values()) if (c.info.uid === conn.info.uid) {
+          c.info.name = name;
+          c.ws.serializeAttachment({ info: c.info, s: c.s } satisfies Attach);
+          this.broadcast({ t: 'rename', id: c.info.id, name });
+        }
         break;
       }
       case 'ping':

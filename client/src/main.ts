@@ -1,11 +1,13 @@
 import * as THREE from 'three';
 import './style.css';
-import { DOORS, ROOMS, levelOfY, raycastPanels, raycastSolid, roomAt } from '../../shared/world';
+import qrcode from 'qrcode-generator';
+import { Mirrors } from './mirrors';
+import { DOORS, ROOMS, insideMirror, levelOfY, raycastPanels, raycastSolid, roomAt } from '../../shared/world';
 import { F_CROUCH, F_DRAWING, F_MOVING, MAX_SIZE, MIN_SIZE, MAX_STROKE_NUMS, type PlayerInfo, type ServerMsg, type StrokeData } from '../../shared/protocol';
 import { buildSky, buildWorld, updateDoors } from './world3d';
 import { Player, type InputState } from './player';
 import { PaintLayer } from './paint';
-import { Avatar } from './avatars';
+import { Avatar, avatarUrl } from './avatars';
 import { Music } from './music';
 import { Visualizer } from './viz';
 import { Net } from './net';
@@ -26,11 +28,11 @@ const store = {
 };
 
 // ------------------------------------------------------------------ identity / login
-interface Identity { token?: string; gid?: string; name?: string }
+// Login is Telegram-only. Desktop: QR code (scan with the phone camera). Mobile: a button that jumps
+// straight into the Telegram app. The bot receives /start login_<code>, the page polls until confirmed.
 
 declare global {
   interface Window {
-    onTelegramAuth?: (u: Record<string, unknown>) => void;
     Telegram?: { WebApp?: { initData: string; ready: () => void; expand: () => void } };
   }
 }
@@ -44,8 +46,25 @@ async function loadScript(src: string) {
   });
 }
 
-async function getIdentity(): Promise<Identity> {
-  // 1) inside Telegram Mini App
+function drawQR(canvas: HTMLCanvasElement, text: string) {
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+  const n = qr.getModuleCount();
+  const quiet = 3;
+  const cell = Math.floor(canvas.width / (n + quiet * 2));
+  const off = Math.floor((canvas.width - cell * n) / 2);
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#fff4e6';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#1a1238';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) ctx.fillRect(off + c * cell, off + r * cell, cell, cell);
+}
+
+let isNewLogin = false;
+
+async function getToken(): Promise<string> {
+  // 1) inside Telegram Mini App: automatic
   if (location.hash.includes('tgWebAppData')) {
     try {
       await loadScript('https://telegram.org/js/telegram-web-app.js');
@@ -53,52 +72,84 @@ async function getIdentity(): Promise<Identity> {
       if (wa?.initData) {
         wa.ready(); wa.expand();
         const r = await fetch(`${API}/api/auth/webapp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ initData: wa.initData }) });
-        if (r.ok) { const { token } = await r.json(); store.set('token', token); return { token }; }
+        if (r.ok) { const { token } = await r.json(); store.set('token', token); if (!store.get('named')) isNewLogin = true; return token; }
       }
     } catch (e) { console.warn(e); }
   }
   // 2) saved session
-  const token = store.get('token');
-  if (token) return { token };
-  const gname = store.get('guestName');
-  if (gname && store.get('gid')) return { gid: store.get('gid')!, name: gname };
+  const saved = store.get('token');
+  if (saved) return saved;
 
-  // 3) show login
+  // 3) bot login
+  $('login').classList.remove('hidden');
+  $(IS_TOUCH ? 'login-mobile' : 'login-desktop').classList.remove('hidden');
+  const status = $('login-status');
   return new Promise((resolve) => {
-    $('login').classList.remove('hidden');
-    const nameInput = $<HTMLInputElement>('guest-name');
-    nameInput.value = store.get('guestName') || '';
-    const goGuest = () => {
-      const name = nameInput.value.trim() || 'спора-' + Math.floor(Math.random() * 999);
-      let gid = store.get('gid');
-      if (!gid) { gid = Math.random().toString(36).slice(2, 12); store.set('gid', gid); }
-      store.set('guestName', name);
-      $('login').classList.add('hidden');
-      resolve({ gid, name });
+    let code = '';
+    let started = 0;
+    const fresh = async () => {
+      status.textContent = '';
+      try {
+        const r = await fetch(`${API}/api/login/start`, { method: 'POST' });
+        const d = (await r.json()) as { code: string; url: string; tg: string };
+        code = d.code; started = Date.now();
+        if (IS_TOUCH) {
+          const a = $<HTMLAnchorElement>('tg-mobile');
+          a.href = d.tg;
+          a.onclick = () => {
+            // no Telegram app installed -> fall back to the web link after a moment
+            const t = setTimeout(() => { if (!document.hidden) location.href = d.url; }, 1500);
+            addEventListener('visibilitychange', () => clearTimeout(t), { once: true });
+          };
+        } else {
+          drawQR($<HTMLCanvasElement>('tg-qr'), d.url);
+          $<HTMLAnchorElement>('tg-desktop-link').href = d.url;
+        }
+      } catch {
+        status.textContent = 'сервер не отвечает, пробую ещё раз…';
+        setTimeout(fresh, 3000);
+      }
     };
-    $('guest-go').onclick = goGuest;
-    nameInput.onkeydown = (e) => { if (e.key === 'Enter') goGuest(); };
+    const poll = async () => {
+      if (!code) return;
+      if (Date.now() - started > 9 * 60 * 1000) { await fresh(); return; }
+      try {
+        const r = await fetch(`${API}/api/login/poll?code=${code}`);
+        const d = (await r.json()) as { status: string; token?: string };
+        if (d.status === 'ok' && d.token) {
+          clearInterval(timer);
+          store.set('token', d.token);
+          isNewLogin = true;
+          $('login').classList.add('hidden');
+          resolve(d.token);
+        } else if (d.status === 'expired') await fresh();
+      } catch { /* retry next tick */ }
+    };
+    const timer = setInterval(poll, 1500);
+    // coming back from the Telegram app on mobile: check right away
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+    fresh();
+  });
+}
 
-    fetch(`${API}/api/config`).then((r) => r.json()).then((cfg: { bot: string | null }) => {
-      if (!cfg.bot) { $('tg-note').textContent = 'вход через Telegram скоро появится'; return; }
-      window.onTelegramAuth = async (user) => {
-        const r = await fetch(`${API}/api/auth/telegram`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(user) });
-        if (!r.ok) { $('tg-note').textContent = 'не получилось войти через Telegram'; return; }
-        const { token } = await r.json();
-        store.set('token', token);
-        $('login').classList.add('hidden');
-        resolve({ token });
-      };
-      const s = document.createElement('script');
-      s.async = true;
-      s.src = 'https://telegram.org/js/telegram-widget.js?22';
-      s.setAttribute('data-telegram-login', cfg.bot);
-      s.setAttribute('data-size', 'large');
-      s.setAttribute('data-radius', '9');
-      s.setAttribute('data-onauth', 'onTelegramAuth(user)');
-      s.setAttribute('data-request-access', 'write');
-      $('tg-login').appendChild(s);
-    }).catch(() => { $('tg-note').textContent = 'сервер спит… попробуй гостем'; });
+/** name dialog: after the first login and whenever the player wants to rename */
+function askName(current: string, first: boolean): Promise<string | null> {
+  return new Promise((resolve) => {
+    if (document.pointerLockElement) document.exitPointerLock();
+    const dlg = $('name-dialog'), input = $<HTMLInputElement>('name-input');
+    $('name-title').textContent = first ? 'как тебя показывать?' : 'новое имя';
+    $('name-cancel').classList.toggle('hidden', first);
+    input.value = current;
+    dlg.classList.remove('hidden');
+    setTimeout(() => { input.focus(); input.select(); }, 50);
+    const done = (v: string | null) => {
+      dlg.classList.add('hidden');
+      $('name-save').onclick = null; input.onkeydown = null; $('name-cancel').onclick = null;
+      resolve(v);
+    };
+    $('name-save').onclick = () => done(input.value.trim() || current);
+    input.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') done(input.value.trim() || current); if (e.key === 'Escape' && !first) done(null); };
+    $('name-cancel').onclick = () => done(null);
   });
 }
 
@@ -124,6 +175,9 @@ const sky = buildSky(scene);
 const paint = new PaintLayer(scene);
 const music = new Music();
 new Visualizer(scene, (b) => music.spectrum(b), () => music.level);
+// your own body: hidden from the first-person camera, shown only while a mirror renders its reflection
+let selfAvatar: Avatar | null = null;
+const mirrors = new Mirrors(scene, IS_TOUCH, (on) => { if (selfAvatar) selfAvatar.root.visible = on; });
 
 addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
@@ -361,8 +415,9 @@ scene.add(ring);
 function avatarThumb(info: PlayerInfo) {
   if (info.photo) {
     const img = document.createElement('img');
-    img.src = `${API}/api/avatar?u=${encodeURIComponent(info.photo)}`;
     img.crossOrigin = 'anonymous';
+    img.src = avatarUrl(info.photo, API);
+    img.onerror = () => img.replaceWith(mushroomFace(info.uid));
     return img;
   }
   return mushroomFace(info.uid);
@@ -377,7 +432,10 @@ function renderPlayers() {
     const row = document.createElement('div'); row.className = 'pl';
     row.appendChild(avatarThumb(info));
     const nm = document.createElement('span'); nm.textContent = info.name; row.appendChild(nm);
-    if (you) { const y = document.createElement('span'); y.className = 'you'; y.textContent = '(ты)'; row.appendChild(y); }
+    if (you) {
+      const y = document.createElement('span'); y.className = 'you'; y.textContent = '(ты)'; row.appendChild(y);
+      const b = document.createElement('button'); b.className = 'ren'; b.textContent = 'сменить имя'; b.onclick = () => renameFlow(); row.appendChild(b);
+    }
     box.appendChild(row);
   };
   if (me) add(me, true);
@@ -410,7 +468,15 @@ async function toggleMusic(force?: boolean) {
 }
 $('btn-music').onclick = () => toggleMusic();
 $('btn-help').onclick = () => { if (IS_TOUCH) alert('Левый круг — идти. Свайп справа — смотреть.\n✎ — режим рисования: води пальцем по стене.\n▲ прыжок · ▾ присесть · ⌂ дверь.\nРисовать можно. Стирать — нельзя.'); else $('pause').classList.remove('hidden'); };
-$('logout').onclick = (e) => { e.stopPropagation(); store.del('token'); store.del('guestName'); location.reload(); };
+$('logout').onclick = (e) => { e.stopPropagation(); store.del('token'); store.del('named'); location.reload(); };
+$('rename').onclick = (e) => { e.stopPropagation(); renameFlow(); };
+let pendingName: string | null = null;
+let authFails = 0;
+async function renameFlow() {
+  if (!me) return;
+  const n = await askName(me.name, false);
+  if (n && n !== me.name) net?.send({ t: 'rename', name: n });
+}
 
 // ------------------------------------------------------------------ doors
 function toggleNearestDoor() {
@@ -451,6 +517,7 @@ function aimRay(screen: { x: number; y: number } | null) {
   if (!hit) return null;
   const solid = raycastSolid(o.x, o.y, o.z, tmpDir.x, tmpDir.y, tmpDir.z, hit.t + 0.1, isDoorOpen);
   if (solid < hit.t - 0.08) return null;
+  if (insideMirror(hit.panel.id, hit.u, hit.v)) return null; // glass is not a canvas
   return hit;
 }
 
@@ -516,6 +583,12 @@ function onMsg(m: ServerMsg) {
   switch (m.t) {
     case 'welcome': {
       me = m.you;
+      if (selfAvatar) { scene.remove(selfAvatar.root); selfAvatar.dispose(); }
+      selfAvatar = new Avatar(me, API);
+      selfAvatar.root.visible = false;
+      scene.add(selfAvatar.root);
+      if (pendingName && pendingName !== me.name) net?.send({ t: 'rename', name: pendingName });
+      pendingName = null;
       for (const a of avatars.values()) { scene.remove(a.root); a.dispose(); }
       avatars.clear();
       for (const p of m.players) addAvatar(p);
@@ -556,6 +629,12 @@ function onMsg(m: ServerMsg) {
     case 'door':
       applyDoor(m.id, m.open);
       break;
+    case 'rename': {
+      if (m.id === me?.id) { me.name = m.name; selfAvatar?.rename(m.name); }
+      else avatars.get(m.id)?.rename(m.name);
+      renderPlayers();
+      break;
+    }
   }
 }
 function addAvatar(p: PlayerInfo) {
@@ -630,6 +709,13 @@ function frame(now: number) {
   sky.stars.position.copy(camera.position);
   updateDoors(world.doors, dt);
   for (const a of avatars.values()) a.update(dt, camera.position);
+  if (selfAvatar) {
+    const flags = (player.crouching ? F_CROUCH : 0) | (player.moving ? F_MOVING : 0) | (chunk ? F_DRAWING : 0);
+    selfAvatar.setDirect(player.x, player.y, player.z, player.yaw, player.pitch, flags);
+    selfAvatar.update(dt, camera.position);
+    selfAvatar.root.visible = false;
+  }
+  mirrors.update(camera.position);
   if (started) {
     updateDrawing();
     sendState(now);
@@ -645,18 +731,28 @@ requestAnimationFrame(frame);
 camera.position.set(20, 8, 44);
 
 (async () => {
-  const id = await getIdentity();
-  const q = new URLSearchParams();
-  if (id.token) q.set('token', id.token);
-  else { q.set('gid', id.gid!); q.set('name', id.name!); }
+  const token = await getToken();
+  const q = new URLSearchParams({ token });
   net = new Net(`${WS}/ws?${q}`);
   net.onMsg = onMsg;
   net.onStatus = (s) => {
     $('conn').classList.toggle('hidden', s === 'open');
     if (s === 'closed') $('conn').textContent = 'соединение потеряно… переподключаюсь';
+    if (s === 'closed' && !me && store.get('token')) {
+      // token rejected (expired / old guest session) -> back to login
+      authFails++;
+      if (authFails >= 3) { store.del('token'); location.reload(); }
+    }
   };
   $('conn').classList.remove('hidden');
   net.connect();
+  if (isNewLogin) {
+    // first time: confirm or change the Telegram name before entering
+    const tgName = await new Promise<string>((res) => { const t = setInterval(() => { if (me) { clearInterval(t); res(me.name); } }, 100); });
+    const n = await askName(tgName, true);
+    store.set('named', '1');
+    if (n && n !== me!.name) net.send({ t: 'rename', name: n });
+  }
   started = true;
   if (!IS_TOUCH) $('pause').classList.remove('hidden');
   // music: remembered choice, but browsers need a gesture to start audio

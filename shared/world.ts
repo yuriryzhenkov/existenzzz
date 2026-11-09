@@ -395,3 +395,23 @@ export function spawnPoint(seed: number) {
   const s = spots[Math.abs(seed) % spots.length];
   return { x: s[0] + 0.5, y: 0.01, z: s[1] + 0.5 };
 }
+
+// ---------- Mirrors ----------
+// The building was a house of culture: the north and east halls of every floor were dance classes,
+// so a mirror hangs on the outer wall between the two windows (cells 18..22).
+export interface Mirror { id: string; level: number; panel: string; u0: number; u1: number; v0: number; v1: number }
+export const MIRROR_V0 = 0.25, MIRROR_V1 = 2.85;
+export const MIRRORS: Mirror[] = (() => {
+  const out: Mirror[] = [];
+  for (let L = 0; L < LEVELS - 1; L++) {
+    // north hall: wall row z=0, face normal +z ; east hall: wall column x=SIZE-1, face normal -x
+    const north = PANELS.find((p) => p.level === L && p.dir === 'pz' && p.oz === 1 && p.ox <= 18.01 && p.ox + p.w >= 22.99);
+    const east = PANELS.find((p) => p.level === L && p.dir === 'nx' && p.ox === SIZE - 1 && p.oz <= 18.01 && p.oz + p.w >= 22.99);
+    if (north) out.push({ id: `m${L}n`, level: L, panel: north.id, u0: 18.15 - north.ox, u1: 22.85 - north.ox, v0: MIRROR_V0, v1: MIRROR_V1 });
+    if (east) out.push({ id: `m${L}e`, level: L, panel: east.id, u0: 18.15 - east.oz, u1: 22.85 - east.oz, v0: MIRROR_V0, v1: MIRROR_V1 });
+  }
+  return out;
+})();
+export function insideMirror(panelId: string, u: number, v: number, pad = 0.1) {
+  return MIRRORS.some((m) => m.panel === panelId && u > m.u0 - pad && u < m.u1 + pad && v > m.v0 - pad && v < m.v1 + pad);
+}

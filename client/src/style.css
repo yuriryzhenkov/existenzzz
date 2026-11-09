@@ -115,3 +115,10 @@ body.touch #pause { display: none !important; }
   #palette { grid-template-columns: repeat(9, 18px); }
   .chip { font-size: 8px; padding: 6px 8px; }
 }
+
+#tg-qr { width: 232px; height: 232px; image-rendering: pixelated; border-radius: 10px; background: #fff4e6; margin: 4px auto 8px; display: block; }
+.tg-btn { display: block; text-decoration: none; padding: 16px; font-size: 11px; background: #2aabee; color: #fff; margin: 6px 0 10px; }
+#login-status { min-height: 18px; margin: 8px 0; }
+#name-dialog { z-index: 30; }
+#name-title { margin-top: 0; }
+.pl .ren { margin-left: auto; background: none; border: 0; color: var(--muted); font-size: 12px; text-decoration: underline; padding: 0 2px; }

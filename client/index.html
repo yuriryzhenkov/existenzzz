@@ -63,24 +63,40 @@
           <div><kbd>M</kbd> музыка · <kbd>Esc</kbd> пауза</div>
         </div>
         <p class="hint">Рисовать можно. Стирать — нельзя. Всё, что ты оставишь, останется.<br />Голубые грибы подбрасывают. В полу бывают дыры. Посмотри наверх.</p>
-        <button id="logout" class="link">выйти из аккаунта</button>
+        <button id="rename" class="link">сменить имя</button> · <button id="logout" class="link">выйти из аккаунта</button>
       </div>
     </div>
 
-    <div id="login" class="overlay">
+    <div id="login" class="overlay hidden">
       <div class="card login-card">
         <div class="logo">
           <div class="shroom"></div>
           <h1>EXISTENZZZ</h1>
         </div>
         <p class="tag">общее пространство. ходи, рисуй, слушай.<br />рисовать можно — стирать нельзя.</p>
-        <div id="tg-login"></div>
-        <div id="tg-note" class="muted small"></div>
-        <div class="guest">
-          <input id="guest-name" maxlength="24" placeholder="или имя гостя" autocomplete="nickname" />
-          <button id="guest-go" class="btn">войти</button>
+        <div id="login-desktop" class="hidden">
+          <canvas id="tg-qr" width="232" height="232"></canvas>
+          <p class="small">Наведи камеру телефона на код —<br />откроется бот, нажми «Старт».</p>
+          <a id="tg-desktop-link" class="link" target="_blank" rel="noopener">или открой Telegram на этом компьютере</a>
         </div>
+        <div id="login-mobile" class="hidden">
+          <a id="tg-mobile" class="btn tg-btn">Войти через Telegram</a>
+          <p class="muted small">Откроется бот — нажми «Старт» и вернись сюда.</p>
+        </div>
+        <div id="login-status" class="muted small"></div>
         <p class="muted small">звук включается кнопкой ♪ — генеративный эмбиент, который слышит, сколько людей рядом</p>
+      </div>
+    </div>
+
+    <div id="name-dialog" class="overlay hidden">
+      <div class="card login-card">
+        <h2 id="name-title">как тебя показывать?</h2>
+        <p class="muted small">Имя появится над головой. Поменять можно в любой момент.</p>
+        <div class="guest">
+          <input id="name-input" maxlength="24" autocomplete="nickname" />
+          <button id="name-save" class="btn">готово</button>
+        </div>
+        <button id="name-cancel" class="link hidden">отмена</button>
       </div>
     </div>
 

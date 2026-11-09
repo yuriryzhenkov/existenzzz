@@ -24,6 +24,7 @@ export type ClientMsg =
   | { t: 'p'; s: [number, number, number, number, number, number] } // x,y,z,yaw,pitch,flags
   | { t: 's'; p: string; d: StrokeData }
   | { t: 'door'; id: string }
+  | { t: 'rename'; name: string }
   | { t: 'ping' };
 
 export type ServerMsg =
@@ -33,6 +34,7 @@ export type ServerMsg =
   | { t: 'ps'; d: PState[] }
   | { t: 's'; p: string; d: StrokeData; by: string }
   | { t: 'door'; id: string; open: boolean }
+  | { t: 'rename'; id: string; name: string }
   | { t: 'pong' }
   | { t: 'err'; m: string };
 

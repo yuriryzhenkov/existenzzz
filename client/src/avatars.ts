@@ -23,6 +23,10 @@ const GEO = {
 };
 const skinMat = new THREE.MeshLambertMaterial({ color: 0xf0d2b8 });
 
+export function avatarUrl(photo: string, api: string) {
+  return photo.startsWith('/') ? api + photo : `${api}/api/avatar?u=${encodeURIComponent(photo)}`;
+}
+
 function faceTexture(info: PlayerInfo, api: string): THREE.Texture {
   const tex = new THREE.CanvasTexture(mushroomFace(info.uid));
   tex.magFilter = THREE.NearestFilter;
@@ -41,7 +45,7 @@ function faceTexture(info: PlayerInfo, api: string): THREE.Texture {
       tex.image = c;
       tex.needsUpdate = true;
     };
-    img.src = `${api}/api/avatar?u=${encodeURIComponent(info.photo)}`;
+    img.src = avatarUrl(info.photo, api);
   }
   return tex;
 }
@@ -79,6 +83,7 @@ export class Avatar {
   head: THREE.Group;
   armL: THREE.Mesh; armR: THREE.Mesh; legL: THREE.Mesh; legR: THREE.Mesh; body: THREE.Mesh;
   snaps: Snap[] = [];
+  label!: THREE.Sprite;
   x = 0; y = 0; z = 0; yaw = 0; pitch = 0; flags = 0;
   phase = 0;
   hasState = false;
@@ -104,9 +109,9 @@ export class Avatar {
     this.armR = new THREE.Mesh(GEO.limb, shirt); this.armR.position.set(0.36, 1.4, 0);
     this.legL = new THREE.Mesh(GEO.limb, pants); this.legL.position.set(-0.125, 0.7, 0);
     this.legR = new THREE.Mesh(GEO.limb, pants); this.legR.position.set(0.125, 0.7, 0);
-    const label = nameSprite(info.name, '#' + this.color.getHexString());
-    label.position.y = 2.05;
-    this.root.add(this.head, this.body, this.armL, this.armR, this.legL, this.legR, label);
+    this.label = nameSprite(info.name, '#' + this.color.getHexString());
+    this.label.position.y = 2.05;
+    this.root.add(this.head, this.body, this.armL, this.armR, this.legL, this.legR, this.label);
     this.root.scale.setScalar(0.95);
     this.root.visible = false;
   }
@@ -118,8 +123,24 @@ export class Avatar {
     if (!this.hasState) { this.hasState = true; this.x = s[1]; this.y = s[2]; this.z = s[3]; this.yaw = s[4]; this.root.visible = true; }
   }
 
+  direct = false; // self avatar (mirrors): pose set every frame, no interpolation
+
+  setDirect(x: number, y: number, z: number, yaw: number, pitch: number, flags: number) {
+    this.direct = true;
+    if (!this.hasState) { this.x = x; this.z = z; }
+    this.hasState = true;
+    this.nx = x; this.ny = y; this.nz = z; this.nyaw = yaw; this.npitch = pitch; this.flags = flags;
+  }
+  private nx = 0; private ny = 0; private nz = 0; private nyaw = 0; private npitch = 0;
+
   update(dt: number, camPos: THREE.Vector3) {
     if (!this.hasState) return;
+    if (this.direct) {
+      const px = this.x, pz = this.z;
+      this.x = this.nx; this.y = this.ny; this.z = this.nz; this.yaw = this.nyaw; this.pitch = this.npitch;
+      this.pose(dt, camPos, px, pz);
+      return;
+    }
     const rt = performance.now() - INTERP_DELAY;
     const sn = this.snaps;
     let a = sn[0], b = sn[sn.length - 1];
@@ -136,7 +157,10 @@ export class Avatar {
     this.yaw = a.yaw + dy * k;
     this.pitch = a.pitch + (b.pitch - a.pitch) * k;
     this.flags = b.f;
+    this.pose(dt, camPos, px, pz);
+  }
 
+  private pose(dt: number, camPos: THREE.Vector3, px: number, pz: number) {
     const dist = camPos.distanceTo(this.root.position);
     this.root.position.set(this.x, this.y, this.z);
     this.root.rotation.y = this.yaw + Math.PI; // model faces +z, yaw 0 looks -z
@@ -153,6 +177,16 @@ export class Avatar {
     this.root.position.y = this.y - (crouch ? 0.25 : 0);
     this.head.rotation.x = -this.pitch * 0.8;
     this.armR.rotation.x = this.flags & F_DRAWING ? -Math.PI / 2 - this.pitch + Math.sin(performance.now() / 90) * 0.1 : swing * 0.8;
+  }
+
+  rename(name: string) {
+    this.info.name = name;
+    const old = this.label;
+    this.label = nameSprite(name, '#' + this.color.getHexString());
+    this.label.position.y = 2.05;
+    this.root.remove(old);
+    old.material.map?.dispose(); old.material.dispose();
+    this.root.add(this.label);
   }
 
   dispose() {
