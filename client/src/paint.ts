@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { PANELS, PANEL_BY_ID, SEGS, blockKey, type Panel } from '../../shared/world';
+import { PANELS, PANEL_BY_ID, SEGS, blockKey, cellAt, segSolid, type Panel } from '../../shared/world';
 import type { StrokeData } from '../../shared/protocol';
 
 export const PX_PER_M = 40;
@@ -138,7 +138,7 @@ export class PaintLayer {
       const c = cellOf(v.panel, i);
       for (let sg = 0; sg < SEGS; sg++) {
         const o = (sg * W + i) * 4;
-        const a = this.isBroken(blockKey(v.panel.level, c.x, c.z, sg)) ? 0 : 255;
+        const a = segSolid(cellAt(v.panel.level, c.x, c.z), v.panel.level, sg) && !this.isBroken(blockKey(v.panel.level, c.x, c.z, sg)) ? 255 : 0;
         d[o] = d[o + 1] = d[o + 2] = a; d[o + 3] = 255;
       }
     }

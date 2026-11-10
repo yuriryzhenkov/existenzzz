@@ -3,7 +3,7 @@ import './style.css';
 import qrcode from 'qrcode-generator';
 import { Mirrors } from './mirrors';
 import { Sfx, surfaceAt, type Surface } from './sfx';
-import { CENTER, DOORS, REBIRTH_MS, FLOOR_H, ROOMS, cellAt, distToBox, isStair, keyBox, keyHardness, onIsland, insideMirror, islandEdge, levelOfY, parseKey, raycastBlock, raycastPanels, raycastSolid, roomAt, type WorldState } from '../../shared/world';
+import { CENTER, DOORS, REBIRTH_MS, FLOOR_H, ROOMS, cellAt, distToBox, isStair, keyBox, keyHardness, onIsland, insideMirror, islandEdge, levelOfY, parseKey, raycastBlock, pointSolid, raycastPanels, raycastSolid, roomAt, type WorldState } from '../../shared/world';
 import { F_CROUCH, F_DRAWING, F_MOVING, MAX_SIZE, MIN_SIZE, MAX_STROKE_NUMS, type PlayerInfo, type ServerMsg, type StrokeData } from '../../shared/protocol';
 import { buildCilia, buildVoid, buildWorld, updateDoors } from './world3d';
 import { Sky } from './sky';
@@ -19,7 +19,7 @@ import { mushroomFace } from './textures';
 // ------------------------------------------------------------------ config
 const API = (import.meta.env.VITE_SERVER as string | undefined) || `http://${location.hostname}:8787`;
 const WS = API.replace(/^http/, 'ws');
-const REACH = 7;
+const REACH = 40; // the brush reaches any wall you can see (within the fog)
 const IS_TOUCH = matchMedia('(pointer: coarse)').matches || ('ontouchstart' in window && navigator.maxTouchPoints > 0);
 if (IS_TOUCH) document.body.classList.add('touch');
 
@@ -248,7 +248,7 @@ addEventListener('mousemove', (e) => {
 });
 addEventListener('mousedown', (e) => { if (locked && e.button === 0) mouseDown = true; });
 addEventListener('mouseup', (e) => { if (e.button === 0) { mouseDown = false; } });
-addEventListener('wheel', (e) => { if (locked) setSize(e.deltaY < 0 ? size * 1.15 + 1 : size / 1.15 - 1); }, { passive: true });
+addEventListener('wheel', (e) => { if (locked) sizeStep(e.deltaY < 0 ? 1 : -1); }, { passive: true });
 
 addEventListener('keydown', (e) => {
   if ((e.target as HTMLElement).tagName === 'INPUT') return;
@@ -261,8 +261,8 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyN') toggleSfx();
   if (e.code === 'KeyH') { if (locked) document.exitPointerLock(); }
   if (e.code === 'Digit1' || e.code === 'Digit2') setTool(Number(e.code.slice(5)) - 1);
-  if (e.code === 'BracketRight') setSize(size + 2);
-  if (e.code === 'BracketLeft') setSize(size - 2);
+  if (e.code === 'BracketRight' || e.code === 'Equal' || e.code === 'NumpadAdd') sizeStep(1);
+  if (e.code === 'BracketLeft' || e.code === 'Minus' || e.code === 'NumpadSubtract') sizeStep(-1);
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
 // Ctrl+W closes the tab before JS can stop it: ask first while you are inside
@@ -397,6 +397,8 @@ function buildToolbar() {
   const sz = $<HTMLInputElement>('size');
   sz.min = String(MIN_SIZE); sz.max = String(MAX_SIZE);
   sz.oninput = () => setSize(Number(sz.value));
+  $('size-minus').onclick = () => sizeStep(-1);
+  $('size-plus').onclick = () => sizeStep(1);
   // keep toolbar clicks from re-locking / drawing
   $('toolbar').addEventListener('mousedown', (e) => e.stopPropagation());
   setTool(tool); setColor(color); setSize(size);
@@ -422,6 +424,21 @@ function setColor(c: number) {
   ringMat.color.set(c);
   flushChunk(true);
 }
+/** one notch bigger / smaller: ~20% per step, so small sizes stay fine-grained */
+function sizeStep(dir: number) {
+  if (tool !== BRUSH) setTool(BRUSH);
+  setSize(dir > 0 ? Math.max(size + 1, size * 1.2) : Math.min(size - 1, size / 1.2));
+  // show the new size near the crosshair
+  const px = Math.max(4, Math.min(48, size * 0.6));
+  const dot = $('size-toast-dot');
+  dot.style.width = dot.style.height = px + 'px';
+  dot.style.background = '#' + color.toString(16).padStart(6, '0');
+  $('size-toast-n').textContent = String(size);
+  $('size-toast').classList.remove('hidden');
+  clearTimeout(sizeToastT);
+  sizeToastT = window.setTimeout(() => $('size-toast').classList.add('hidden'), 900);
+}
+let sizeToastT = 0;
 function setSize(s: number) {
   size = Math.max(MIN_SIZE, Math.min(MAX_SIZE, Math.round(s))); store.set('size2', String(size));
   $<HTMLInputElement>('size').value = String(size);
@@ -551,9 +568,9 @@ function aimRay(screen: { x: number; y: number } | null) {
   const o = camera.position;
   const hit = raycastPanels(o.x, o.y, o.z, tmpDir.x, tmpDir.y, tmpDir.z, REACH);
   if (!hit) return null;
-  const solid = raycastSolid(o.x, o.y, o.z, tmpDir.x, tmpDir.y, tmpDir.z, hit.t + 0.1, ws);
-  if (solid < hit.t - 0.08) return null;
-  if (solid > hit.t + 0.08) return null; // the tissue behind this spot is torn out
+  // nothing in front of the spot, and tissue right behind it (not an opening or a torn-out block)
+  if (raycastSolid(o.x, o.y, o.z, tmpDir.x, tmpDir.y, tmpDir.z, hit.t - 0.12, ws, 0.1) < Infinity) return null;
+  if (!pointSolid(o.x + tmpDir.x * (hit.t + 0.05), o.y + tmpDir.y * (hit.t + 0.05), o.z + tmpDir.z * (hit.t + 0.05), ws)) return null;
   if (insideMirror(hit.panel.id, hit.u, hit.v)) return null; // glass is not a canvas
   return hit;
 }

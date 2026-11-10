@@ -386,6 +386,40 @@ export const PANELS: Panel[] = (() => {
   }
   return out;
 })();
+// Window sills, lintels above doors and windows, railings are canvases too. They get their own panels
+// with a 'w' suffix, so the ids of the original wall panels (and the strokes stored on them) stay stable.
+// The paint is masked to the blocks that actually exist.
+{
+  const part = (c: string | null) => c === 'w' || c === 'D' || c === 'r';
+  const open = (c: string | null) => c === null || !'#wDr'.includes(c);
+  for (let L = 0; L < LEVELS - 1; L++) {
+    const y = L * FLOOR_H;
+    for (const nz of [1, -1]) for (let z = 0; z < SIZE; z++) {
+      let run = -1;
+      for (let x = 0; x <= SIZE; x++) {
+        const ok = x < SIZE && part(cellAt(L, x, z)) && open(cellAt(L, x, z + nz));
+        if (ok && run < 0) run = x;
+        if (!ok && run >= 0) {
+          const ux = nz > 0 ? 1 : -1;
+          PANELS.push({ id: `${L}${nz > 0 ? 'pz' : 'nz'}${z}.${run}w`, level: L, dir: nz > 0 ? 'pz' : 'nz', ox: ux > 0 ? run : x, oy: y, oz: nz > 0 ? z + 1 : z, ux, uz: 0, nx: 0, nz, w: x - run, h: WALL_H });
+          run = -1;
+        }
+      }
+    }
+    for (const nx of [1, -1]) for (let x = 0; x < SIZE; x++) {
+      let run = -1;
+      for (let z = 0; z <= SIZE; z++) {
+        const ok = z < SIZE && part(cellAt(L, x, z)) && open(cellAt(L, x + nx, z));
+        if (ok && run < 0) run = z;
+        if (!ok && run >= 0) {
+          const uz = nx > 0 ? -1 : 1;
+          PANELS.push({ id: `${L}${nx > 0 ? 'px' : 'nx'}${x}.${run}w`, level: L, dir: nx > 0 ? 'px' : 'nx', ox: nx > 0 ? x + 1 : x, oy: y, oz: uz > 0 ? run : z, ux: 0, uz, nx, nz: 0, w: z - run, h: WALL_H });
+          run = -1;
+        }
+      }
+    }
+  }
+}
 export const PANEL_BY_ID = new Map(PANELS.map((p) => [p.id, p]));
 
 /** Ray (origin o, normalized dir d) vs panels. Returns nearest hit within maxDist. */
@@ -406,8 +440,12 @@ export function raycastPanels(ox: number, oy: number, oz: number, dx: number, dy
 }
 
 /** Ray vs solid geometry via sampling (cheap, coarse). Returns distance to first solid or Infinity */
-export function raycastSolid(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, ws: WorldState) {
-  const step = 0.05;
+/** is the point inside something solid? */
+export function pointSolid(x: number, y: number, z: number, ws: WorldState) {
+  for (const b of boxesIn(x, y, z, x, y, z, ws)) if (x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1 && z > b.z0 && z < b.z1) return true;
+  return false;
+}
+export function raycastSolid(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, ws: WorldState, step = 0.05) {
   for (let t = 0.2; t < maxDist; t += step) {
     const x = ox + dx * t, y = oy + dy * t, z = oz + dz * t;
     const bs = boxesIn(x, y, z, x, y, z, ws);

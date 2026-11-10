@@ -32,10 +32,12 @@
 
     <div id="toolbar" class="hud">
       <div id="tools"></div>
-      <div id="size-wrap">
+      <div id="size-wrap" title="размер кисти: колесо мыши, клавиши [ ] или − +">
+        <button id="size-minus" class="size-btn" aria-label="меньше">−</button>
         <span id="size-dot"></span>
         <input id="size" type="range" min="2" max="80" value="24" />
-        <span id="size-label">12</span>
+        <button id="size-plus" class="size-btn" aria-label="больше">+</button>
+        <span class="size-txt"><b id="size-label">24</b> см<i class="size-hint">колесо · [ ]</i></span>
       </div>
       <div id="palette"></div>
     </div>
@@ -52,6 +54,7 @@
     </div>
 
     <div id="mine-bar" class="hidden"><i></i></div>
+    <div id="size-toast" class="hidden"><span id="size-toast-dot"></span><b id="size-toast-n"></b> см</div>
     <div id="edge-warn" class="hidden">край острова · дальше бездна</div>
     <div id="sky-label" class="hud"></div>
 
@@ -75,7 +78,7 @@
           <div><kbd>ЛКМ</kbd> рисовать (кисть) / бить (кирка) · <kbd>1</kbd>/<kbd>2</kbd> выбрать</div>
           <div><kbd>Q</kbd> держать — бить киркой что угодно</div>
           <div><kbd>W</kbd> в стену снаружи — лезть по сухожилиям</div>
-          <div><kbd>E</kbd> двери и предметы · <kbd>колесо</kbd> размер кисти</div>
+          <div><kbd>E</kbd> двери и предметы · <kbd>колесо</kbd> или <kbd>[</kbd> <kbd>]</kbd> — размер кисти</div>
           <div>в окно — прыжок и <kbd>Ctrl</kbd> в воздухе (поджать ноги)</div>
           <div><kbd>Tab</kbd> курсор для палитры</div>
           <div><kbd>M</kbd> музыка · <kbd>N</kbd> шаги · <kbd>Esc</kbd> пауза</div>
