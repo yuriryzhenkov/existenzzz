@@ -1,4 +1,4 @@
-import { DEATH_Y, SIZE, boxesIn, spawnPoint, type Box, type WorldState } from '../../shared/world';
+import { DEATH_Y, SIZE, TERMINAL_V, boxesIn, spawnPoint, type Box, type WorldState } from '../../shared/world';
 
 export const HALF_W = 0.3;
 export const STAND_H = 1.8;
@@ -36,6 +36,7 @@ export class Player {
   climbing = false; // pressed against a climbable surface (facade tendons from outside, mushroom stems)
   climbMoved = 0; // metres climbed, for the sinew creak
   dead = false;
+  private prevJump = false;
   ws: WorldState;
 
   constructor(ws: WorldState, seed: number) {
@@ -77,8 +78,15 @@ export class Player {
   update(dt: number, inp: InputState) {
     if (this.dead) return;
     // crouch (check head room when standing up)
-    if (inp.crouch) this.crouching = true;
-    else if (this.crouching && this.overlaps(this.x, this.y, this.z, STAND_H).length === 0) this.crouching = false;
+    const tuck = STAND_H - CROUCH_H;
+    if (inp.crouch && !this.crouching) {
+      this.crouching = true;
+      // in the air you tuck your legs up: the head stays where it was, the feet rise
+      if (!this.onGround && this.overlaps(this.x, this.y + tuck, this.z, CROUCH_H).length === 0) { this.y += tuck; this.eye -= tuck; }
+    } else if (!inp.crouch && this.crouching) {
+      if (this.overlaps(this.x, this.y, this.z, STAND_H).length === 0) this.crouching = false;
+      else if (!this.onGround && this.overlaps(this.x, this.y - tuck, this.z, STAND_H).length === 0) { this.y -= tuck; this.eye += tuck; this.crouching = false; }
+    }
 
     this.sprinting = inp.sprint && !this.crouching && inp.fwd > 0.3;
     const speed = this.crouching ? SNEAK : this.sprinting ? SPRINT : WALK;
@@ -100,7 +108,7 @@ export class Player {
     this.moving = Math.hypot(this.vx, this.vz) > 0.6;
 
     if (this.climbing) {
-      if (inp.jump && !this.onGround) { // push off the wall
+      if (inp.jump && !this.prevJump && !this.onGround) { // push off the wall (fresh press only)
         const l = Math.hypot(wx, wz) || 1;
         this.vx = -(wx / l) * 5; this.vz = -(wz / l) * 5; this.vy = 6;
         this.climbing = false;
@@ -118,7 +126,8 @@ export class Player {
       this.onGround = false;
     }
     if (!this.climbing) this.vy -= GRAVITY * dt;
-    if (this.vy < -40) this.vy = -40;
+    this.prevJump = inp.jump;
+    if (this.vy < -TERMINAL_V) this.vy = -TERMINAL_V;
 
     // boxes we are already stuck in (e.g. a door closed on us) are ignored
     const stuck = new Set(this.overlaps(this.x, this.y, this.z, this.height).map(bkey));
@@ -181,8 +190,8 @@ export class Player {
       }
       return;
     }
-    // horizontal: try step-up
-    if (wasGround) {
+    // horizontal: try step-up (on the ground, or catching a ledge in the air while not rising fast)
+    if (wasGround || this.vy < 2.5) {
       let top = -Infinity;
       for (const b of hits) top = Math.max(top, b.y1);
       const rise = top - this.y;

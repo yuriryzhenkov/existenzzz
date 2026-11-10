@@ -242,7 +242,7 @@ export class Sfx {
   fall() {
     const v = this.voice(0.9); if (!v) return;
     const { t, noise, tone } = v;
-    noise(400, 0.6, 'bandpass', t, 3.5, 0.5, 1.5, 3000);
-    tone(110, 30, t, 4, 0.25, 'sine', 0.5);
+    noise(300, 0.6, 'bandpass', t, 6, 0.5, 3, 3200);
+    tone(120, 28, t, 6, 0.25, 'sine', 1);
   }
 }

@@ -3,7 +3,7 @@ import './style.css';
 import qrcode from 'qrcode-generator';
 import { Mirrors } from './mirrors';
 import { Sfx, surfaceAt } from './sfx';
-import { CENTER, DOORS, FLOOR_H, ROOMS, SEG_H, SLAB, hardness, insideMirror, islandEdge, levelOfY, parseKey, raycastBlock, raycastPanels, raycastSolid, roomAt, type WorldState } from '../../shared/world';
+import { CENTER, DOORS, FLOOR_H, ROOMS, SEG_H, SLAB, cellAt, hardness, isStair, onIsland, stairH, insideMirror, islandEdge, levelOfY, parseKey, raycastBlock, raycastPanels, raycastSolid, roomAt, type WorldState } from '../../shared/world';
 import { F_CROUCH, F_DRAWING, F_MOVING, MAX_SIZE, MIN_SIZE, MAX_STROKE_NUMS, type PlayerInfo, type ServerMsg, type StrokeData } from '../../shared/protocol';
 import { buildCilia, buildVoid, buildWorld, updateDoors } from './world3d';
 import { Sky } from './sky';
@@ -254,7 +254,7 @@ addEventListener('keydown', (e) => {
   if ((e.target as HTMLElement).tagName === 'INPUT') return;
   keys.add(e.code);
   // Ctrl is crouch: keep the browser from treating Ctrl+W/S/D as shortcuts while playing
-  if (locked && (e.ctrlKey || e.metaKey) && e.code !== 'KeyR') e.preventDefault();
+  if (locked && (e.ctrlKey || e.metaKey) && e.code !== 'KeyR' && e.code !== 'KeyC' && e.code !== 'KeyV') e.preventDefault();
   if (e.code === 'Tab') { e.preventDefault(); if (locked) document.exitPointerLock(); }
   if (e.code === 'KeyE') toggleNearestDoor();
   if (e.code === 'KeyM') toggleMusic();
@@ -263,10 +263,6 @@ addEventListener('keydown', (e) => {
   if (e.code === 'Digit1' || e.code === 'Digit2') setTool(Number(e.code.slice(5)) - 1);
   if (e.code === 'BracketRight') setSize(size + 2);
   if (e.code === 'BracketLeft') setSize(size - 2);
-  if (e.code === 'KeyQ' || e.code === 'KeyR') {
-    const i = PALETTE.indexOf(color);
-    setColor(PALETTE[(i + (e.code === 'KeyR' ? 1 : -1) + PALETTE.length) % PALETTE.length]);
-  }
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
 // Ctrl+W closes the tab before JS can stop it: ask first while you are inside
@@ -584,7 +580,7 @@ function flushChunk(end = false) {
 }
 
 function updateDrawing() {
-  const active = (IS_TOUCH ? touchDraw : locked) && tool === BRUSH;
+  const active = (IS_TOUCH ? touchDraw : locked) && tool === BRUSH && !qHeld();
   const wantDraw = IS_TOUCH ? touchDraw && touchDrawPoint !== null : locked && mouseDown;
   const hit = active ? aimRay(IS_TOUCH ? touchDrawPoint : null) : null;
   // preview ring
@@ -627,11 +623,16 @@ hl.renderOrder = 11; hl.visible = false; scene.add(hl);
 
 function blockBox(L: number, x: number, z: number, s: number) {
   const base = L * FLOOR_H;
+  const c = cellAt(L, x, z);
+  if (s === 0 && isStair(c)) return { y0: base, y1: base + stairH(c!) };
   return s < 0 ? { y0: base - SLAB, y1: base } : { y0: base + s * SEG_H, y1: base + (s + 1) * SEG_H };
 }
+/** Q (any tool) or LMB with the pickaxe in hand */
+const qHeld = () => locked && keys.has('KeyQ');
+const pickInHand = () => tool === PICK || qHeld();
 function updateMining(dt: number) {
-  const active = (IS_TOUCH ? touchDraw : locked) && tool === PICK && !dead;
-  const want = IS_TOUCH ? touchDraw && touchDrawPoint !== null : locked && mouseDown;
+  const active = (IS_TOUCH ? touchDraw && tool === PICK : locked && pickInHand()) && !dead;
+  const want = IS_TOUCH ? touchDraw && tool === PICK && touchDrawPoint !== null : qHeld() || (locked && mouseDown && tool === PICK);
   let target: ReturnType<typeof raycastBlock> = null;
   if (active) {
     const sp = IS_TOUCH ? touchDrawPoint : null;
@@ -648,24 +649,61 @@ function updateMining(dt: number) {
     hl.position.set(target.x + 0.5, (b.y0 + b.y1) / 2, target.z + 0.5);
     hl.scale.set(1, (b.y1 - b.y0) + 0.02, 1);
   } else hl.visible = false;
-  if (!want || !target) { mining = null; $('mine-bar').classList.add('hidden'); held.swing = 0; return; }
+  // the swing never waits: you see and hear the pickaxe working the moment you press
+  if (want && active) held.swing += dt; else held.swing = 0;
+  if (!want || !target) { mining = null; $('mine-bar').classList.add('hidden'); return; }
   if (!mining || mining.key !== target.key) mining = { key: target.key, t: 0, need: hardness(target.L, target.x, target.z, target.s), L: target.L, x: target.x, z: target.z, s: target.s, lastHit: 0 };
   mining.t += dt;
-  held.swing += dt;
   const now = performance.now();
-  if (now - mining.lastHit > 280) {
+  if (now - mining.lastHit > 110) {
     mining.lastHit = now;
+    const o = camera.position;
+    chips(o.x + tmpDir.x * (target.t - 0.05), o.y + tmpDir.y * (target.t - 0.05), o.z + tmpDir.z * (target.t - 0.05), target.s < 0 ? 0xc8b8a0 : 0xff8fb8, 4);
     sfx.pick(target.s < 0 ? floorSurface(target.L, target.x, target.z) : 'membrane');
+    shake = 0.012;
   }
   $('mine-bar').classList.remove('hidden');
   ($('mine-bar').firstElementChild as HTMLElement).style.width = Math.min(100, (mining.t / mining.need) * 100) + '%';
   if (mining.t >= mining.need) {
     net?.send({ t: 'mine', k: mining.key });
     applyBroken(mining.key, true); // optimistic; the server confirms or heals it back
+    const bb = blockBox(target.L, target.x, target.z, target.s);
+    chips(target.x + 0.5, (bb.y0 + bb.y1) / 2, target.z + 0.5, 0xff4f7a, 14);
     sfx.tear();
+    shake = 0.03;
     mining = null;
     $('mine-bar').classList.add('hidden');
   }
+}
+
+// tissue chips flying from the pickaxe
+const CHIPS = 48;
+const chipMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.07, 0.07, 0.07), new THREE.MeshBasicMaterial({ color: 0xffffff }), CHIPS);
+chipMesh.frustumCulled = false;
+chipMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+for (let i = 0; i < CHIPS; i++) chipMesh.setColorAt(i, new THREE.Color(0xffffff));
+scene.add(chipMesh);
+const chipState = Array.from({ length: CHIPS }, () => ({ x: 0, y: -999, z: 0, vx: 0, vy: 0, vz: 0, life: 0 }));
+let chipNext = 0, shake = 0;
+const chipCol = new THREE.Color();
+function chips(x: number, y: number, z: number, color: number, n: number) {
+  for (let i = 0; i < n; i++) {
+    const c = chipState[chipNext];
+    chipMesh.setColorAt(chipNext, chipCol.setHex(color).multiplyScalar(0.7 + Math.random() * 0.5));
+    chipNext = (chipNext + 1) % CHIPS;
+    Object.assign(c, { x, y, z, vx: (Math.random() - 0.5) * 4 - tmpDir.x * 2, vy: Math.random() * 3.5 + 1, vz: (Math.random() - 0.5) * 4 - tmpDir.z * 2, life: 0.5 + Math.random() * 0.4 });
+  }
+  if (chipMesh.instanceColor) chipMesh.instanceColor.needsUpdate = true;
+}
+const chipM = new THREE.Matrix4();
+function updateChips(dt: number) {
+  for (let i = 0; i < CHIPS; i++) {
+    const c = chipState[i];
+    if (c.life > 0) { c.life -= dt; c.vy -= 14 * dt; c.x += c.vx * dt; c.y += c.vy * dt; c.z += c.vz * dt; }
+    chipM.makeTranslation(c.x, c.life > 0 ? c.y : -999, c.z);
+    chipMesh.setMatrixAt(i, chipM);
+  }
+  chipMesh.instanceMatrix.needsUpdate = true;
 }
 function floorSurface(L: number, x: number, z: number) {
   return surfaceAt(x + 0.5, L * FLOOR_H, z + 0.5);
@@ -703,12 +741,14 @@ const held = { group: new THREE.Group(), pick: new THREE.Group(), brush: new THR
 }
 function updateHeld(now: number) {
   held.group.visible = started && !dead && !(IS_TOUCH && !touchDraw);
-  held.pick.visible = tool === PICK;
-  held.brush.visible = tool === BRUSH;
+  held.pick.visible = pickInHand();
+  held.brush.visible = !pickInHand();
   ((held.brush.getObjectByName('tuft') as THREE.Mesh).material as THREE.MeshBasicMaterial).color.setHex(color);
   const bob = player.moving && player.onGround ? Math.sin(now / (player.sprinting ? 70 : 110)) * 0.015 : 0;
-  const sw = held.swing > 0 ? Math.sin(held.swing * 22) * 0.6 : (chunk ? Math.sin(now / 90) * 0.06 : 0);
-  held.group.position.y = -0.28 + bob;
+  // a hit every 110 ms: a fast, sharp swing (down quick, up slower)
+  const ph = (held.swing / 0.11) % 1;
+  const sw = held.swing > 0 ? (ph < 0.35 ? ph / 0.35 : 1 - (ph - 0.35) / 0.65) * 1.1 : (chunk ? Math.sin(now / 90) * 0.06 : 0);
+  held.group.position.y = -0.28 + bob - (held.swing > 0 ? sw * 0.05 : 0);
   held.group.rotation.x = 0.2 - Math.max(0, sw);
 }
 
@@ -723,7 +763,6 @@ function die(fromServer: boolean) {
   if (document.pointerLockElement) document.exitPointerLock();
   $('pause').classList.add('hidden');
   $('death').classList.remove('hidden');
-  sfx.fall();
   music.stop();
 }
 
@@ -959,12 +998,17 @@ function frame(now: number) {
     updateField(now);
   }
   updateHeld(now);
+  updateChips(dt);
+  if (shake > 0) { camera.position.x += (Math.random() - 0.5) * shake; camera.position.y += (Math.random() - 0.5) * shake; shake = Math.max(0, shake - dt * 0.2); }
+  // stepped off the island: a long fall through the void, then nothing
+  if (!fallHeard && !dead && player.y < -4 && !onIsland(player.x, player.z)) { fallHeard = true; sfx.fall(); feed('ты падаешь в бездну…'); }
   paint.flush();
   renderer.render(scene, camera);
 }
 
 // every living surface knows where the nearest people are (and how lively they are)
 let beatI = 0;
+let fallHeard = false;
 function updateLife(t: number) {
   const ppl: { x: number; y: number; z: number; w: number; d: number }[] = [];
   if (!dead) ppl.push({ x: player.x, y: player.y + 0.9, z: player.z, w: player.moving ? 1 : 0.6, d: 0 });
@@ -1015,6 +1059,7 @@ camera.position.set(20, 8, 44);
     if (n && n !== me!.name) net.send({ t: 'rename', name: n });
   }
   started = true;
+  setTimeout(() => feed(IS_TOUCH ? '⛏ кирка ломает что угодно — ткань зарастёт через 15 минут' : '⛏ зажми Q — кирка ломает что угодно, ткань зарастёт через 15 минут'), 1500);
   if (!IS_TOUCH && !dead) $('pause').classList.remove('hidden');
   // music: remembered choice, but browsers need a gesture to start audio
   if (store.get('music') === '1') {

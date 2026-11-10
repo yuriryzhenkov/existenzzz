@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import {
-  CENTER, DOORS, DOOR_H, DOOR_THICK, FLOOR_H, LEVELS, LEVEL_GRIDS, PAD_H, RAIL_H, SEGS, SEG_H, SIZE, SLAB, STATIC_BOXES, WALL_H, WIN_HI, WIN_LO,
+  CENTER, DOORS, DOOR_H, DOOR_THICK, FLOOR_H, LEVELS, LEVEL_GRIDS, PAD_H, SEGS, SEG_H, SIZE, SLAB, STATIC_BOXES, blockAt, segSolid,
   blockKey, cellAt, isPerimeter, isStair, islandEdge, onIsland, stairH, type Door, type WorldState,
 } from '../../shared/world';
 import {
@@ -113,35 +113,7 @@ export function buildWorld(scene: THREE.Scene, ws: WorldState) {
     const base = L * FLOOR_H;
     for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
       const c = LEVEL_GRIDS[L][z][x];
-      const nb = (dx: number, dz: number) => cellAt(L, x + dx, z + dz);
-      if (c === 'w' || c === 'D') {
-        const cull = (n: string | null) => n === '#' || n === 'w' || n === 'D';
-        for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
-          if (cull(nb(dx, dz))) continue;
-          const m = nb(dx, dz) === null ? S.scales : S.membrane;
-          if (c === 'w') m.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + WIN_LO, z1: z + 1 }, f);
-          m.box({ x0: x, y0: base + (c === 'w' ? WIN_HI : DOOR_H), z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f, W, 1);
-        }
-        if (c === 'w') S.bone.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + WIN_LO, z1: z + 1 }, 'Y'); // sill
-        S.bone.box({ x0: x, y0: base + (c === 'w' ? WIN_HI : DOOR_H), z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, 'y'); // lintel
-      } else if (c === 'r') {
-        let f = '';
-        if (nb(1, 0) !== 'r') f += 'X';
-        if (nb(-1, 0) !== 'r') f += 'x';
-        if (nb(0, 1) !== 'r') f += 'Z';
-        if (nb(0, -1) !== 'r') f += 'z';
-        if (L === LEVELS - 1 && isPerimeter(x, z)) {
-          S.scales.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1 }, f + 'Y'); // the outer skin rises into a parapet
-        } else {
-          S.bone.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H - 0.12, z1: z + 1 }, f); // rib
-          S.sinew.box({ x0: x, y0: base + RAIL_H - 0.12, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1 }, f + 'Y', W, 1); // sinew handrail
-        }
-      } else if (isStair(c)) {
-        // the stairs are vertebrae: bone body, cartilage disc on top
-        const h = base + stairH(c);
-        S.bone.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: h - 0.08, z1: z + 1 }, 'XxZz', W, 0.75);
-        S.cartilage.box({ x0: x + 0.04, y0: h - 0.08, z0: z + 0.04, x1: x + 0.96, y1: h, z1: z + 0.96 }, 'XxZzY', W, 1);
-      } else if (c === 'b' || c === 'B') {
+      if (c === 'b' || c === 'B') {
         const big = c === 'B', e = big ? 0.1 : 0;
         S.stem.box({ x0: x + 0.38, y0: base, z0: z + 0.38, x1: x + 0.62, y1: base + 0.3, z1: z + 0.62 }, 'XxZz');
         S.pad.box({ x0: x - e, y0: base + 0.3, z0: z - e, x1: x + 1 + e, y1: base + PAD_H, z1: z + 1 + e }, 'XxZzYy', W, 0.85);
@@ -191,7 +163,6 @@ export function buildWorld(scene: THREE.Scene, ws: WorldState) {
   // ---------------- dynamic parts: per level (walls are tissue segments, slabs can be dug) ----------------
   const levelGroups: THREE.Group[] = [];
   const finishOf = (L: number, x: number, z: number): K => (L === LEVELS - 1 ? 'roe' : L === 0 ? (inAtrium(x, z) ? 'soil' : 'nacre') : 'felt');
-  const isWall = (L: number, x: number, z: number, s: number) => cellAt(L, x, z) === '#' && !ws.broken(blockKey(L, x, z, s));
 
   function buildLevel(L: number) {
     const D = Object.fromEntries(Object.keys(M).map((k) => [k, new Mesher()])) as Record<K, Mesher>;
@@ -221,21 +192,49 @@ export function buildWorld(scene: THREE.Scene, ws: WorldState) {
         }
       }
     }
-    // wall tissue segments
-    if (L < LEVELS - 1) for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
-      if (g[z][x] !== '#') continue;
+    // blocks: walls, window sills and lintels, door lintels, railings — all 0.9 m tissue blocks
+    const solid = (x: number, z: number, sg: number) => blockAt(L, x, z, sg, ws);
+    const structural = (c: string | null) => c === '#' || c === 'w' || c === 'D' || c === 'r';
+    for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
+      const c = g[z][x];
+      if (isStair(c)) {
+        if (ws.broken(blockKey(L, x, z, 0))) continue;
+        // the stairs are vertebrae: bone body, cartilage disc on top
+        const h = base + stairH(c);
+        D.bone.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: h - 0.08, z1: z + 1 }, 'XxZz', W, 0.75);
+        D.cartilage.box({ x0: x + 0.04, y0: h - 0.08, z0: z + 0.04, x1: x + 0.96, y1: h, z1: z + 0.96 }, 'XxZzY', W, 1);
+        continue;
+      }
+      if (!structural(c)) continue;
+      const rail = c === 'r';
+      const parapet = rail && L === LEVELS - 1 && isPerimeter(x, z);
       for (let s = 0; s < SEGS; s++) {
-        if (!isWall(L, x, z, s)) continue;
+        if (!solid(x, z, s)) continue;
         const b = { x0: x, y0: base + s * SEG_H, z0: z, x1: x + 1, y1: base + (s + 1) * SEG_H, z1: z + 1 };
+        const ao = s === 0 ? 0.75 : 1;
         for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
           const n = cellAt(L, x + dx, z + dz);
-          if (n === '#') { if (!isWall(L, x + dx, z + dz, s)) D.wound.box(b, f, W, 1); continue; }
-          if (n === 'w' || n === 'D') { D.bone.box(b, f, W, 1); continue; } // the jamb of a window / doorway: the bone shows in the cut
-          (n === null ? D.scales : D.membrane).box(b, f, W, s === 0 ? 0.75 : 1);
+          if (solid(x + dx, z + dz, s)) continue;
+          if (n === null) { D.scales.box(b, f, W, ao); continue; } // outer skin
+          if (segSolid(n, L, s)) { D.wound.box(b, f, W, 1); continue; } // the neighbour block was torn out
+          if (parapet) D.scales.box(b, f, W, ao);
+          else if (rail) D.bone.box(b, f, W, ao); // railing rib
+          else if (structural(n)) D.bone.box(b, f, W, 1); // jamb of a window / doorway: bone in the cut
+          else D.membrane.box(b, f, W, ao);
         }
-        if (s < SEGS - 1 && !isWall(L, x, z, s + 1)) D.wound.box(b, 'Y');
-        if (s === SEGS - 1 && L + 1 < LEVELS && ws.broken(blockKey(L + 1, x, z, -1))) D.wound.box(b, 'Y');
-        if (s > 0 && !isWall(L, x, z, s - 1)) D.wound.box(b, 'y');
+        // top
+        if (!solid(x, z, s + 1)) {
+          if (segSolid(c, L, s + 1)) D.wound.box(b, 'Y');
+          else if (s === SEGS - 1) { if (L + 1 < LEVELS && ws.broken(blockKey(L + 1, x, z, -1))) D.wound.box(b, 'Y'); }
+          else if (parapet) D.scales.box(b, 'Y');
+          else if (rail) D.sinew.box(b, 'Y'); // sinew handrail
+          else D.bone.box(b, 'Y'); // window sill
+        }
+        // bottom
+        if (s > 0 && !solid(x, z, s - 1)) {
+          if (segSolid(c, L, s - 1)) D.wound.box(b, 'y');
+          else D.bone.box(b, 'y'); // lintel underside
+        }
       }
     }
     const grp = new THREE.Group();

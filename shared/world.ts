@@ -11,10 +11,12 @@ export const LEVELS = 4; // 0,1,2 = floors with walls, 3 = roof
 export const FLOOR_H = 5;
 export const WALL_H = 4.5;
 export const SLAB = 0.5;
-export const RAIL_H = 1.1;
-export const WIN_LO = 1.2;
-export const WIN_HI = 3.0;
-export const DOOR_H = 3.0;
+// everything is built from blocks 1 × 0.9 × 1 m (5 per storey) so the pickaxe can take anything apart.
+// window: 1 block of sill, 2 blocks of opening (1.8 m: crouch to get through), 2 blocks above
+export const RAIL_H = 0.9;
+export const WIN_LO = 0.9;
+export const WIN_HI = 2.7;
+export const DOOR_H = 2.7;
 export const PAD_H = 0.6;
 export const CENTER = SIZE / 2;
 // walls are made of 5 stacked tissue segments (0.9m) so the pickaxe can wound them piece by piece
@@ -22,7 +24,8 @@ export const SEG_H = 0.9;
 export const SEGS = 5;
 // the organism floats as an island above the void; falling below DEATH_Y is death, forever
 export const ISLAND_R = 40;
-export const DEATH_Y = -16;
+export const DEATH_Y = -135; // ~5.5 s of falling through the void before it takes you
+export const TERMINAL_V = 26;
 export const REGROW_MS = 15 * 60 * 1000;
 
 /** irregular shoreline of the floating island */
@@ -225,6 +228,21 @@ export function doorBox(d: Door): Box {
 // ---------- Collision ----------
 export const isPerimeter = (x: number, z: number) => x === 0 || z === 0 || x === SIZE - 1 || z === SIZE - 1;
 
+/** is block s (0..4) of a cell with this legend part of the original structure? */
+export function segSolid(c: string | null, L: number, s: number) {
+  if (c === null || s < 0 || s >= SEGS) return false;
+  switch (c) {
+    case '#': return L < LEVELS - 1;
+    case 'w': return s === 0 || s >= 3;
+    case 'D': return s >= 3;
+    case 'r': return s === 0;
+  }
+  return false;
+}
+/** block present right now (structure minus wounds) */
+export const blockAt = (L: number, x: number, z: number, s: number, ws: WorldState) =>
+  segSolid(cellAt(L, x, z), L, s) && !ws.broken(blockKey(L, x, z, s));
+
 /** Push boxes of the voxel cell into out. */
 export function cellBoxes(L: number, x: number, z: number, out: Box[], ws: WorldState) {
   const base = L * FLOOR_H;
@@ -236,20 +254,12 @@ export function cellBoxes(L: number, x: number, z: number, out: Box[], ws: World
   const c = LEVEL_GRIDS[L][z][x];
   const facade = isPerimeter(x, z) ? 'facade' as const : undefined;
   if (c !== 'o' && !ws.broken(blockKey(L, x, z, -1))) out.push({ x0: x, y0: base - SLAB, z0: z, x1: x + 1, y1: base, z1: z + 1, climb: facade });
-  if (L === LEVELS - 1 && c === '#') return;
+  for (let sg = 0; sg < SEGS; sg++) {
+    if (!segSolid(c, L, sg) || ws.broken(blockKey(L, x, z, sg))) continue;
+    out.push({ x0: x, y0: base + sg * SEG_H, z0: z, x1: x + 1, y1: base + (sg + 1) * SEG_H, z1: z + 1, climb: facade });
+  }
   switch (c) {
-    case '#':
-      for (let sg = 0; sg < SEGS; sg++) {
-        if (ws.broken(blockKey(L, x, z, sg))) continue;
-        out.push({ x0: x, y0: base + sg * SEG_H, z0: z, x1: x + 1, y1: base + (sg + 1) * SEG_H, z1: z + 1, climb: facade });
-      }
-      break;
-    case 'w':
-      out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + WIN_LO, z1: z + 1, climb: facade });
-      out.push({ x0: x, y0: base + WIN_HI, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1, climb: facade });
-      break;
     case 'D': {
-      out.push({ x0: x, y0: base + DOOR_H, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1, climb: facade });
       const d = doorAtCell(L, x, z);
       if (d && !ws.doorOpen(d.id)) {
         const b = doorBox(d);
@@ -257,11 +267,10 @@ export function cellBoxes(L: number, x: number, z: number, out: Box[], ws: World
       }
       break;
     }
-    case 'r': out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1, climb: facade }); break;
     case 'b': out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + PAD_H, z1: z + 1, bounce: BOUNCE_SMALL }); break;
     case 'B': out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + PAD_H, z1: z + 1, bounce: BOUNCE_BIG }); break;
     default:
-      if (isStair(c)) out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + stairH(c), z1: z + 1 });
+      if (isStair(c) && !ws.broken(blockKey(L, x, z, 0))) out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + stairH(c), z1: z + 1 });
   }
 }
 
@@ -452,18 +461,19 @@ export function hardness(L: number, x: number, z: number, s: number): number {
   const c = cellAt(L, x, z);
   if (c === null) return 0;
   if (s === -1) {
-    // floors above ground can be dug through (not the ground, not under walls/stairs/doors)
-    if (L === 0) return 0;
-    return c === ' ' ? 1.1 : 0;
+    // any floor plate above the ground; the ground itself holds the island together (a hole there = the void)
+    if (L === 0 || c === 'o') return 0;
+    return 0.55;
   }
-  if (c !== '#' || L >= LEVELS - 1 || s < 0 || s >= SEGS) return 0;
+  if (isStair(c)) return s === 0 ? 0.4 : 0; // a whole vertebra at once
+  if (!segSolid(c, L, s)) return 0;
   // the mirrors are not tissue
   for (const m of MIRRORS) {
     if (m.level !== L || s > 3) continue;
     if (m.id.endsWith('n') && z === 0 && x >= 18 && x <= 22) return 0;
     if (m.id.endsWith('e') && x === SIZE - 1 && z >= 18 && z <= 22) return 0;
   }
-  return 0.6;
+  return 0.35;
 }
 
 export function parseKey(key: string) {
@@ -482,7 +492,7 @@ export function raycastBlock(ox: number, oy: number, oz: number, dx: number, dy:
     const ix = Math.floor(x), iz = Math.floor(z);
     const L = Math.floor((y + SLAB) / FLOOR_H);
     const local = y - L * FLOOR_H;
-    const s = local < 0 ? -1 : Math.floor(local / SEG_H);
+    const s = local < 0 ? -1 : isStair(cellAt(L, ix, iz)) ? 0 : Math.min(SEGS - 1, Math.floor(local / SEG_H));
     if (hit.kind || hit.bounce) return null;
     if (!hardness(L, ix, iz, s)) return null;
     return { L, x: ix, z: iz, s, t, key: blockKey(L, ix, iz, s) };
