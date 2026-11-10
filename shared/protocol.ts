@@ -33,7 +33,7 @@ export type ServerMsg =
   | { t: 'welcome'; you: PlayerInfo; players: PlayerInfo[]; states: PState[]; doors: Record<string, boolean>; panels: Record<string, number>; strokes: number; broken: [string, number][] }
   | { t: 'broken'; k: string; by: string; until: number }
   | { t: 'heal'; k: string[] }
-  | { t: 'dead' }
+  | { t: 'dead'; until: number }
   | { t: 'died'; id: string; name: string }
   | { t: 'join'; p: PlayerInfo }
   | { t: 'leave'; id: string }

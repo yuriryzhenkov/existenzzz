@@ -27,6 +27,8 @@ export const ISLAND_R = 40;
 export const DEATH_Y = -135; // ~5.5 s of falling through the void before it takes you
 export const TERMINAL_V = 26;
 export const REGROW_MS = 15 * 60 * 1000;
+// the void dissolves the body; the organism grows a new one after this long
+export const REBIRTH_MS = 30 * 1000;
 
 /** irregular shoreline of the floating island */
 export function islandEdge(angle: number) {

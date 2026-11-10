@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { DEATH_Y, DOOR_BY_ID, FLOOR_H, PANEL_BY_ID, REGROW_MS, SEG_H, hardness, parseKey } from '../../shared/world';
+import { DEATH_Y, REBIRTH_MS, DOOR_BY_ID, FLOOR_H, PANEL_BY_ID, REGROW_MS, SEG_H, hardness, parseKey } from '../../shared/world';
 import { MAX_SIZE, MAX_STROKE_NUMS, MIN_SIZE, type ClientMsg, type PlayerInfo, type PState, type ServerMsg, type StrokeData } from '../../shared/protocol';
 
 export interface Env {
@@ -298,13 +298,17 @@ export class World extends DurableObject<Env> {
     if (next < Infinity) this.ctx.storage.setAlarm(Math.max(Date.now() + 500, next));
   }
 
-  isDead(uid: string) {
-    return [...this.sql.exec(`SELECT uid FROM dead WHERE uid = ?`, uid)].length > 0;
+  /** 0 if alive, else the time the new body will be ready */
+  deadUntil(uid: string) {
+    const r = [...this.sql.exec(`SELECT t FROM dead WHERE uid = ?`, uid)][0] as { t: number } | undefined;
+    if (!r) return 0;
+    const until = r.t + REBIRTH_MS;
+    return until > Date.now() ? until : 0;
   }
   kill(conn: Conn) {
     this.sql.exec(`INSERT OR REPLACE INTO dead (uid, name, t) VALUES (?, ?, ?)`, conn.info.uid, conn.info.name, Date.now());
     for (const c of [...this.conns.values()]) if (c.info.uid === conn.info.uid) {
-      try { c.ws.send(JSON.stringify({ t: 'dead' } satisfies ServerMsg)); } catch { /* */ }
+      try { c.ws.send(JSON.stringify({ t: 'dead', until: Date.now() + REBIRTH_MS } satisfies ServerMsg)); } catch { /* */ }
       this.broadcast({ t: 'died', id: c.info.id, name: c.info.name }, c.ws);
       this.conns.delete(c.ws);
       this.dirty.delete(c);
@@ -362,8 +366,9 @@ export class World extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server);
-    if (this.isDead(user.uid)) {
-      server.send(JSON.stringify({ t: 'dead' } satisfies ServerMsg));
+    const until = this.deadUntil(user.uid);
+    if (until) {
+      server.send(JSON.stringify({ t: 'dead', until } satisfies ServerMsg));
       server.close(4001, 'dead');
       return new Response(null, { status: 101, webSocket: client });
     }

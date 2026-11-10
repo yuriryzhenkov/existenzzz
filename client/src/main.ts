@@ -3,7 +3,7 @@ import './style.css';
 import qrcode from 'qrcode-generator';
 import { Mirrors } from './mirrors';
 import { Sfx, surfaceAt } from './sfx';
-import { CENTER, DOORS, FLOOR_H, ROOMS, SEG_H, SLAB, cellAt, hardness, isStair, onIsland, stairH, insideMirror, islandEdge, levelOfY, parseKey, raycastBlock, raycastPanels, raycastSolid, roomAt, type WorldState } from '../../shared/world';
+import { CENTER, DOORS, REBIRTH_MS, FLOOR_H, ROOMS, SEG_H, SLAB, cellAt, hardness, isStair, onIsland, stairH, insideMirror, islandEdge, levelOfY, parseKey, raycastBlock, raycastPanels, raycastSolid, roomAt, type WorldState } from '../../shared/world';
 import { F_CROUCH, F_DRAWING, F_MOVING, MAX_SIZE, MIN_SIZE, MAX_STROKE_NUMS, type PlayerInfo, type ServerMsg, type StrokeData } from '../../shared/protocol';
 import { buildCilia, buildVoid, buildWorld, updateDoors } from './world3d';
 import { Sky } from './sky';
@@ -753,7 +753,21 @@ function updateHeld(now: number) {
 }
 
 // ------------------------------------------------------------------ death
-function die(fromServer: boolean) {
+// falling is death, but not the end: after REBIRTH_MS the organism grows you a new body (server-enforced)
+let rebirthTimer = 0;
+function rebirthCountdown(until: number) {
+  clearInterval(rebirthTimer);
+  const tick = () => {
+    const left = Math.ceil((until - Date.now()) / 1000);
+    $('rebirth-wait').textContent = left > 0 ? `новое тело будет готово через ${left} с` : '';
+    $('rebirth').classList.toggle('hidden', left > 0);
+  };
+  tick();
+  rebirthTimer = window.setInterval(tick, 250);
+}
+$('rebirth').onclick = () => location.reload();
+function die(fromServer: boolean, until = Date.now() + REBIRTH_MS) {
+  rebirthCountdown(until);
   if (dead) return;
   dead = true;
   player.dead = true;
@@ -845,10 +859,10 @@ function onMsg(m: ServerMsg) {
       break;
     }
     case 'dead':
-      die(true);
+      die(true, m.until);
       break;
     case 'died':
-      if (m.id !== me?.id) feed(`☠ ${m.name} — бездна забрала навсегда`);
+      if (m.id !== me?.id) feed(`☠ бездна забрала ${m.name}`);
       break;
     case 'rename': {
       if (m.id === me?.id) { me.name = m.name; selfAvatar?.rename(m.name); }
