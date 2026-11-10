@@ -230,7 +230,7 @@ export function buildWorld(scene: THREE.Scene, ws: WorldState) {
         for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
           const n = cellAt(L, x + dx, z + dz);
           if (n === '#') { if (!isWall(L, x + dx, z + dz, s)) D.wound.box(b, f, W, 1); continue; }
-          if (n === 'w' || n === 'D') continue;
+          if (n === 'w' || n === 'D') { D.bone.box(b, f, W, 1); continue; } // the jamb of a window / doorway: the bone shows in the cut
           (n === null ? D.scales : D.membrane).box(b, f, W, s === 0 ? 0.75 : 1);
         }
         if (s < SEGS - 1 && !isWall(L, x, z, s + 1)) D.wound.box(b, 'Y');
