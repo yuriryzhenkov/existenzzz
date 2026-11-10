@@ -13,6 +13,7 @@ export function surfaceAt(x: number, y: number, z: number): Surface {
     if (Math.abs(b.y1 - y) < 0.08 && x >= b.x0 - 0.3 && x <= b.x1 + 0.3 && z >= b.z0 - 0.3 && z <= b.z1 + 0.3) return 'flesh';
   }
   const ix = Math.floor(x), iz = Math.floor(z);
+  if (y < -0.3) return 'soil'; // dug down into the island's flesh
   if (ix < 0 || iz < 0 || ix >= SIZE || iz >= SIZE) return y > 0.5 ? 'scales' : 'cilia';
   const L = Math.max(0, Math.min(LEVELS - 1, Math.floor((y + 0.1) / FLOOR_H)));
   const c = cellAt(L, ix, iz);

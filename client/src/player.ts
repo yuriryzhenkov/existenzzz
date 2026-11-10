@@ -195,11 +195,14 @@ export class Player {
       let top = -Infinity;
       for (const b of hits) top = Math.max(top, b.y1);
       const rise = top - this.y;
-      if (rise > 0 && rise <= STEP && this.overlaps(this.x, top + 0.001, this.z, h, stuck).length === 0) {
-        this.y = top + 0.001;
-        return;
+      if (rise > 0 && rise <= STEP) {
+        if (this.overlaps(this.x, top + 0.001, this.z, h, stuck).length === 0) { this.y = top + 0.001; return; }
+        // a low opening above the ledge (a window): duck into it
+        if (!this.crouching && this.overlaps(this.x, top + 0.001, this.z, CROUCH_H, stuck).length === 0) { this.y = top + 0.001; this.crouching = true; return; }
       }
     }
+    // only the head is blocked (lintel, window top): duck automatically, stand up again when there is room
+    if (!this.crouching && this.overlaps(this.x, this.y, this.z, CROUCH_H, stuck).length === 0) { this.crouching = true; return; }
     const p = axis === 'x' ? this.x : this.z;
     let fix = p;
     for (const b of hits) {

@@ -39,10 +39,38 @@ export function onIsland(x: number, z: number) {
   return Math.hypot(dx, dz) <= islandEdge(Math.atan2(dz, dx));
 }
 
+/** thickness of the island body under column (x, z), metres (0 off the island) */
+export function islandDepth(x: number, z: number) {
+  if (!onIsland(x + 0.5, z + 0.5)) return 0;
+  const dx = x + 0.5 - CENTER, dz = z + 0.5 - CENTER;
+  const r = Math.hypot(dx, dz) / islandEdge(Math.atan2(dz, dx));
+  const n = Math.sin(x * 0.7) * Math.cos(z * 0.6) * 1.5 + Math.sin((x + z) * 0.31) * 2;
+  return Math.max(1.2, Math.round((Math.pow(Math.max(0, 1 - r), 0.55) * 20 + n + 1) * 2) / 2);
+}
+// Under the 0.5 m top plate the island is solid flesh in 1 m layers, k = 1..n (key `-k.x.z.0`).
+// The last layer reaches down to the belly. Dig through it and you fall into the void.
+const GROUND_CACHE = new Map<number, number>();
+const gcKey = (x: number, z: number) => (x + 100) * 1000 + (z + 100);
+export function groundLayers(x: number, z: number) {
+  const k = gcKey(x, z);
+  let n = GROUND_CACHE.get(k);
+  if (n === undefined) { const d = islandDepth(x, z); n = d ? Math.max(1, Math.floor(d - SLAB)) : 0; GROUND_CACHE.set(k, n); }
+  return n;
+}
+/** [bottom, top] of ground layer k of the column; k = 0 is the top plate */
+export function layerY(x: number, z: number, k: number): [number, number] {
+  if (k === 0) return [-SLAB, 0];
+  const top = -SLAB - (k - 1);
+  return [k === groundLayers(x, z) ? -islandDepth(x, z) : top - 1, top];
+}
+export const groundKey = (x: number, z: number, k: number) => (k === 0 ? `0.${x}.${z}.-1` : `${-k}.${x}.${z}.0`);
+
 /** dynamic world state the geometry depends on */
 export interface WorldState {
   doorOpen: (id: string) => boolean;
   broken: (key: string) => boolean;
+  /** all broken keys (for fast rebuilds); optional */
+  all?: () => Iterable<string>;
 }
 /** key of a breakable block: wall segment s=0..4, slab s=-1 */
 export const blockKey = (L: number, x: number, z: number, s: number) => `${L}.${x}.${z}.${s}`;
@@ -149,11 +177,11 @@ export const isStair = (c: string | null) => c !== null && c >= '0' && c <= '9';
 export const stairH = (c: string) => (c.charCodeAt(0) - 48 + 1) * 0.5;
 
 // ---------- Giant mushrooms (extra solid objects) ----------
-export interface Box { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number; bounce?: number; kind?: string; species?: number; climb?: 'facade' | 'stem' }
+export interface Box { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number; bounce?: number; kind?: string; species?: number; climb?: 'facade' | 'stem'; key?: string }
 
-export const MUSHROOM_STEM: Box = { x0: 19.2, y0: 0, z0: 19.2, x1: 21.8, y1: 10.5, z1: 21.8, kind: 'stem', climb: 'stem' };
-export const MUSHROOM_CAP: Box = { x0: 17, y0: 10.5, z0: 17, x1: 24, y1: 11.4, z1: 24, kind: 'cap' };
-export const MUSHROOM_TOP: Box = { x0: 18, y0: 11.4, z0: 18, x1: 23, y1: 11.9, z1: 23, kind: 'cap' };
+export const MUSHROOM_STEM: Box = { x0: 19.2, y0: 0, z0: 19.2, x1: 21.8, y1: 10.5, z1: 21.8, kind: 'stem', climb: 'stem', key: 'm.h' };
+export const MUSHROOM_CAP: Box = { x0: 17, y0: 10.5, z0: 17, x1: 24, y1: 11.4, z1: 24, kind: 'cap', key: 'm.h' };
+export const MUSHROOM_TOP: Box = { x0: 18, y0: 11.4, z0: 18, x1: 23, y1: 11.9, z1: 23, kind: 'cap', key: 'm.h' };
 
 // Outdoor giant mushrooms on the meadow (deterministic)
 /** species: 0 fly agaric, 1 porcini, 2 chanterelle, 3 russula, 4 parasol */
@@ -174,10 +202,10 @@ export const STATIC_BOXES: Box[] = [
   MUSHROOM_STEM,
   MUSHROOM_CAP,
   MUSHROOM_TOP,
-  ...MEADOW_SHROOMS.flatMap((m): Box[] => [
-    { x0: m.x - 0.4 - m.r * 0.15, y0: 0, z0: m.z - 0.4 - m.r * 0.15, x1: m.x + 0.4 + m.r * 0.15, y1: m.h, z1: m.z + 0.4 + m.r * 0.15, kind: 'stem', species: m.species, climb: 'stem' },
-    { x0: m.x - m.r, y0: m.h, z0: m.z - m.r, x1: m.x + m.r, y1: m.h + 0.8, z1: m.z + m.r, kind: 'cap', species: m.species },
-    { x0: m.x - m.r * 0.6, y0: m.h + 0.8, z0: m.z - m.r * 0.6, x1: m.x + m.r * 0.6, y1: m.h + 1.3, z1: m.z + m.r * 0.6, kind: 'cap', species: m.species, bounce: m.h < 7 ? 15 : 0 },
+  ...MEADOW_SHROOMS.flatMap((m, i): Box[] => [
+    { x0: m.x - 0.4 - m.r * 0.15, y0: 0, z0: m.z - 0.4 - m.r * 0.15, x1: m.x + 0.4 + m.r * 0.15, y1: m.h, z1: m.z + 0.4 + m.r * 0.15, kind: 'stem', species: m.species, climb: 'stem', key: `m.${i}` },
+    { x0: m.x - m.r, y0: m.h, z0: m.z - m.r, x1: m.x + m.r, y1: m.h + 0.8, z1: m.z + m.r, kind: 'cap', species: m.species, key: `m.${i}` },
+    { x0: m.x - m.r * 0.6, y0: m.h + 0.8, z0: m.z - m.r * 0.6, x1: m.x + m.r * 0.6, y1: m.h + 1.3, z1: m.z + m.r * 0.6, kind: 'cap', species: m.species, bounce: m.h < 7 ? 15 : 0, key: `m.${i}` },
   ]),
 ];
 
@@ -220,6 +248,8 @@ for (const d of DOORS) for (let i = 0; i < d.len; i++) {
 export const doorAtCell = (L: number, x: number, z: number) => DOOR_BY_CELL.get(`${L},${x},${z}`);
 
 export const DOOR_THICK = 0.2;
+/** the pickaxe takes a whole door at once */
+export const doorKey = (d: Door) => `${d.level}.${d.x0}.${d.z0}.0`;
 /** Collision box of a closed door */
 export function doorBox(d: Door): Box {
   const y0 = d.level * FLOOR_H;
@@ -250,7 +280,7 @@ export function cellBoxes(L: number, x: number, z: number, out: Box[], ws: World
   const base = L * FLOOR_H;
   const inside = x >= 0 && z >= 0 && x < SIZE && z < SIZE;
   if (!inside) {
-    if (L === 0 && onIsland(x + 0.5, z + 0.5)) out.push({ x0: x, y0: -SLAB, z0: z, x1: x + 1, y1: 0, z1: z + 1 });
+    if (L === 0 && onIsland(x + 0.5, z + 0.5) && !ws.broken(blockKey(0, x, z, -1))) out.push({ x0: x, y0: -SLAB, z0: z, x1: x + 1, y1: 0, z1: z + 1 });
     return;
   }
   const c = LEVEL_GRIDS[L][z][x];
@@ -263,14 +293,14 @@ export function cellBoxes(L: number, x: number, z: number, out: Box[], ws: World
   switch (c) {
     case 'D': {
       const d = doorAtCell(L, x, z);
-      if (d && !ws.doorOpen(d.id)) {
+      if (d && !ws.doorOpen(d.id) && !ws.broken(doorKey(d))) {
         const b = doorBox(d);
         out.push({ x0: Math.max(b.x0, x), y0: b.y0, z0: Math.max(b.z0, z), x1: Math.min(b.x1, x + 1), y1: b.y1, z1: Math.min(b.z1, z + 1) });
       }
       break;
     }
-    case 'b': out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + PAD_H, z1: z + 1, bounce: BOUNCE_SMALL }); break;
-    case 'B': out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + PAD_H, z1: z + 1, bounce: BOUNCE_BIG }); break;
+    case 'b': if (!ws.broken(blockKey(L, x, z, 0))) out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + PAD_H, z1: z + 1, bounce: BOUNCE_SMALL }); break;
+    case 'B': if (!ws.broken(blockKey(L, x, z, 0))) out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + PAD_H, z1: z + 1, bounce: BOUNCE_BIG }); break;
     default:
       if (isStair(c) && !ws.broken(blockKey(L, x, z, 0))) out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + stairH(c), z1: z + 1 });
   }
@@ -284,7 +314,17 @@ export function boxesIn(x0: number, y0: number, z0: number, x1: number, y1: numb
   for (let L = L0; L <= L1; L++)
     for (let z = Math.floor(z0); z <= Math.floor(z1); z++)
       for (let x = Math.floor(x0); x <= Math.floor(x1); x++) cellBoxes(L, x, z, out, ws);
-  for (const b of STATIC_BOXES) if (b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1 && b.z1 > z0 && b.z0 < z1) out.push(b);
+  // underground layers
+  if (y0 < -SLAB) for (let z = Math.floor(z0); z <= Math.floor(z1); z++) for (let x = Math.floor(x0); x <= Math.floor(x1); x++) {
+    const n = groundLayers(x, z);
+    const kTop = Math.max(1, Math.floor(-SLAB - y1) + 1), kBot = Math.min(n, Math.floor(-SLAB - y0) + 1);
+    for (let k = kTop; k <= kBot; k++) {
+      if (ws.broken(groundKey(x, z, k))) continue;
+      const [b, t] = layerY(x, z, k);
+      if (t > y0 && b < y1) out.push({ x0: x, y0: b, z0: z, x1: x + 1, y1: t, z1: z + 1 });
+    }
+  }
+  for (const b of STATIC_BOXES) if (!(b.key && ws.broken(b.key)) && b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1 && b.z1 > z0 && b.z0 < z1) out.push(b);
   return out;
 }
 
@@ -458,24 +498,47 @@ export function insideMirror(panelId: string, u: number, v: number, pad = 0.1) {
 }
 
 // ---------- Breaking (pickaxe) ----------
-/** hardness in seconds of holding the pickaxe, 0 = unbreakable */
+/** hardness in seconds of holding the pickaxe, 0 = not a block. Everything is breakable. */
 export function hardness(L: number, x: number, z: number, s: number): number {
+  if (L < 0) return s === 0 && -L <= groundLayers(x, z) ? 0.5 : 0; // island flesh underground
   const c = cellAt(L, x, z);
+  if (L === 0 && s === -1) return c !== 'o' && onIsland(x + 0.5, z + 0.5) ? 0.45 : 0; // the ground plate
   if (c === null) return 0;
-  if (s === -1) {
-    // any floor plate above the ground; the ground itself holds the island together (a hole there = the void)
-    if (L === 0 || c === 'o') return 0;
-    return 0.55;
-  }
+  if (s === -1) return c === 'o' ? 0 : 0.55;
   if (isStair(c)) return s === 0 ? 0.4 : 0; // a whole vertebra at once
+  if ((c === 'b' || c === 'B') && s === 0) return 0.3; // bounce pad
+  if (c === 'D' && s === 0) { const d = doorAtCell(L, x, z); return d && d.x0 === x && d.z0 === z ? 0.4 : 0; }
   if (!segSolid(c, L, s)) return 0;
-  // the mirrors are not tissue
-  for (const m of MIRRORS) {
-    if (m.level !== L || s > 3) continue;
-    if (m.id.endsWith('n') && z === 0 && x >= 18 && x <= 22) return 0;
-    if (m.id.endsWith('e') && x === SIZE - 1 && z >= 18 && z <= 22) return 0;
-  }
   return 0.35;
+}
+const SHROOM_KEY = /^m\.(h|\d+)$/;
+export function keyHardness(key: string): number {
+  const m = SHROOM_KEY.exec(key);
+  if (m) return m[1] === 'h' ? 1.6 : Number(m[1]) < MEADOW_SHROOMS.length ? 0.7 : 0;
+  const { L, x, z, s } = parseKey(key);
+  if (![L, x, z, s].every(Number.isInteger) || blockKey(L, x, z, s) !== key) return 0;
+  return hardness(L, x, z, s);
+}
+/** bounds of a block (for reach checks and the highlight) */
+export function keyBox(key: string): Box | null {
+  if (key.startsWith('m.')) {
+    const bs = STATIC_BOXES.filter((b) => b.key === key);
+    if (!bs.length) return null;
+    return { x0: Math.min(...bs.map((b) => b.x0)), y0: 0, z0: Math.min(...bs.map((b) => b.z0)), x1: Math.max(...bs.map((b) => b.x1)), y1: Math.max(...bs.map((b) => b.y1)), z1: Math.max(...bs.map((b) => b.z1)) };
+  }
+  const { L, x, z, s } = parseKey(key);
+  if (L < 0) { const [b, t] = layerY(x, z, -L); return { x0: x, y0: b, z0: z, x1: x + 1, y1: t, z1: z + 1 }; }
+  const base = L * FLOOR_H;
+  if (s < 0) return { x0: x, y0: base - SLAB, z0: z, x1: x + 1, y1: base, z1: z + 1 };
+  const c = cellAt(L, x, z);
+  if (isStair(c)) return { x0: x, y0: base, z0: z, x1: x + 1, y1: base + stairH(c!), z1: z + 1 };
+  if (c === 'b' || c === 'B') return { x0: x, y0: base, z0: z, x1: x + 1, y1: base + PAD_H, z1: z + 1 };
+  if (c === 'D' && s === 0) { const d = doorAtCell(L, x, z); if (d) return doorBox(d); }
+  return { x0: x, y0: base + s * SEG_H, z0: z, x1: x + 1, y1: base + (s + 1) * SEG_H, z1: z + 1 };
+}
+export function distToBox(b: Box, x: number, y: number, z: number) {
+  const cx = Math.max(b.x0, Math.min(x, b.x1)), cy = Math.max(b.y0, Math.min(y, b.y1)), cz = Math.max(b.z0, Math.min(z, b.z1));
+  return Math.hypot(cx - x, cy - y, cz - z);
 }
 
 export function parseKey(key: string) {
@@ -483,7 +546,7 @@ export function parseKey(key: string) {
   return { L, x, z, s };
 }
 
-/** Which breakable block does the ray hit first (null if something unbreakable is in the way) */
+/** Which block does the ray hit first (null if nothing within reach) */
 export function raycastBlock(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, ws: WorldState) {
   const step = 0.03;
   for (let t = 0.1; t < maxDist; t += step) {
@@ -491,13 +554,23 @@ export function raycastBlock(ox: number, oy: number, oz: number, dx: number, dy:
     const bs = boxesIn(x, y, z, x, y, z, ws);
     const hit = bs.find((b) => x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1 && z > b.z0 && z < b.z1);
     if (!hit) continue;
-    const ix = Math.floor(x), iz = Math.floor(z);
-    const L = Math.floor((y + SLAB) / FLOOR_H);
-    const local = y - L * FLOOR_H;
-    const s = local < 0 ? -1 : isStair(cellAt(L, ix, iz)) ? 0 : Math.min(SEGS - 1, Math.floor(local / SEG_H));
-    if (hit.kind || hit.bounce) return null;
-    if (!hardness(L, ix, iz, s)) return null;
-    return { L, x: ix, z: iz, s, t, key: blockKey(L, ix, iz, s) };
+    let key: string;
+    if (hit.key) key = hit.key; // a mushroom
+    else {
+      const ix = Math.floor(x), iz = Math.floor(z);
+      if (y < -SLAB) key = groundKey(ix, iz, Math.min(groundLayers(ix, iz), Math.floor(-SLAB - y) + 1));
+      else {
+        const L = Math.floor((y + SLAB) / FLOOR_H);
+        const local = y - L * FLOOR_H;
+        const c = cellAt(L, ix, iz);
+        if (local < 0) key = blockKey(L, ix, iz, -1);
+        else if (isStair(c) || c === 'b' || c === 'B') key = blockKey(L, ix, iz, 0);
+        else if (c === 'D' && local < DOOR_H) { const d = doorAtCell(L, ix, iz); if (!d) return null; key = doorKey(d); }
+        else key = blockKey(L, ix, iz, Math.min(SEGS - 1, Math.floor(local / SEG_H)));
+      }
+    }
+    if (!keyHardness(key)) return null;
+    return { key, t };
   }
   return null;
 }

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import {
-  CENTER, DOORS, DOOR_H, DOOR_THICK, FLOOR_H, LEVELS, LEVEL_GRIDS, PAD_H, SEGS, SEG_H, SIZE, SLAB, STATIC_BOXES, blockAt, segSolid,
-  blockKey, cellAt, isPerimeter, isStair, islandEdge, onIsland, stairH, type Door, type WorldState,
+  CENTER, DOORS, DOOR_H, DOOR_THICK, FLOOR_H, LEVELS, LEVEL_GRIDS, PAD_H, SEGS, SEG_H, SIZE, SLAB, STATIC_BOXES, blockAt, segSolid, doorKey, groundKey, groundLayers, layerY, parseKey,
+  blockKey, cellAt, isPerimeter, isStair, onIsland, stairH, type Door, type WorldState,
 } from '../../shared/world';
 import {
   boneTex, capTex, cartilageTex, feltTex, gillTex, lipTex, membraneTex, mossTex, nacreTex, roeTex, scalesTex, sinewTex, soilTex, stemTex, woundTex,
@@ -107,58 +107,85 @@ export function buildWorld(scene: THREE.Scene, ws: WorldState) {
   };
   type K = keyof typeof M;
 
-  // ---------------- static parts ----------------
-  const S = Object.fromEntries(Object.keys(M).map((k) => [k, new Mesher()])) as Record<K, Mesher>;
-  for (let L = 0; L < LEVELS; L++) {
-    const base = L * FLOOR_H;
-    for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
-      const c = LEVEL_GRIDS[L][z][x];
-      if (c === 'b' || c === 'B') {
-        const big = c === 'B', e = big ? 0.1 : 0;
-        S.stem.box({ x0: x + 0.38, y0: base, z0: z + 0.38, x1: x + 0.62, y1: base + 0.3, z1: z + 0.62 }, 'XxZz');
-        S.pad.box({ x0: x - e, y0: base + 0.3, z0: z - e, x1: x + 1 + e, y1: base + PAD_H, z1: z + 1 + e }, 'XxZzYy', W, 0.85);
-      }
-    }
-  }
-  for (const b of STATIC_BOXES) {
-    const sp = b.species ?? 0;
-    if (b.kind === 'stem') S.stem.box(b, 'XxZz', SPECIES[sp].stem, 0.75);
-    else if (b.kind === 'cap') {
-      (b.species === undefined ? S.heart : S[`sp${sp}` as K]).box(b, 'XxZzY', W, 0.85);
-      S.gill.box(b, 'y');
-    }
-  }
-
-  // ---------------- the island: surface outside the building + stalactite belly over the void ----------------
-  const R = 47;
-  const depth = (x: number, z: number) => {
-    const dx = x + 0.5 - CENTER, dz = z + 0.5 - CENTER;
-    const r = Math.hypot(dx, dz) / islandEdge(Math.atan2(dz, dx));
-    const n = Math.sin(x * 0.7) * Math.cos(z * 0.6) * 1.5 + Math.sin((x + z) * 0.31) * 2;
-    return Math.max(1.2, Math.round((Math.pow(Math.max(0, 1 - r), 0.55) * 20 + n + 1) * 2) / 2);
+  type Meshers = Record<K, Mesher>;
+  const newMeshers = () => Object.fromEntries(Object.keys(M).map((k) => [k, new Mesher()])) as Meshers;
+  const toGroup = (D: Meshers) => {
+    const grp = new THREE.Group();
+    for (const k of Object.keys(D) as K[]) if (D[k].idx.length) grp.add(D[k].build(M[k]));
+    return grp;
   };
-  for (let z = Math.floor(CENTER - R); z < CENTER + R; z++) {
-    let run = -1;
-    for (let x = Math.floor(CENTER - R); x <= CENTER + R; x++) {
-      const inBuilding = x >= 0 && z >= 0 && x < SIZE && z < SIZE;
-      const ok = x < CENTER + R && onIsland(x + 0.5, z + 0.5) && !inBuilding;
-      if (ok && run === -1) run = x;
-      if (!ok && run !== -1) { S.moss.box({ x0: run, y0: -SLAB, z0: z, x1: x, y1: 0, z1: z + 1 }, 'Y'); run = -1; }
-    }
-    for (let x = Math.floor(CENTER - R); x < CENTER + R; x++) {
-      if (!onIsland(x + 0.5, z + 0.5)) continue;
-      const d = depth(x, z);
-      S.belly.box({ x0: x, y0: -d, z0: z, x1: x + 1, y1: 0, z1: z + 1 }, 'y', [0.7, 0.62, 0.66]);
-      for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
-        const nx = x + dx, nz = z + dz;
-        const nd = onIsland(nx + 0.5, nz + 0.5) ? depth(nx, nz) : 0;
-        if (nd < d) S.belly.box({ x0: x, y0: -d, z0: z, x1: x + 1, y1: -nd, z1: z + 1 }, f, [0.75, 0.66, 0.7], 0.6);
+  /** a part of the world that can be rebuilt when the pickaxe changes it */
+  const part = (build: () => THREE.Group) => {
+    let g = build();
+    scene.add(g);
+    return () => {
+      scene.remove(g);
+      g.traverse((o) => { if (o instanceof THREE.Mesh) o.geometry.dispose(); });
+      g = build();
+      scene.add(g);
+    };
+  };
+
+  // ---------------- mushrooms (the giant one is the heart) ----------------
+  const rebuildShrooms = part(() => {
+    const D = newMeshers();
+    for (const b of STATIC_BOXES) {
+      if (b.key && ws.broken(b.key)) continue;
+      const sp = b.species ?? 0;
+      if (b.kind === 'stem') D.stem.box(b, 'XxZz', SPECIES[sp].stem, 0.75);
+      else if (b.kind === 'cap') {
+        (b.species === undefined ? D.heart : D[`sp${sp}` as K]).box(b, 'XxZzY', W, 0.85);
+        D.gill.box(b, 'y');
       }
     }
-  }
-  const staticGroup = new THREE.Group();
-  for (const k of Object.keys(S) as K[]) if (S[k].idx.length) staticGroup.add(S[k].build(M[k]));
-  scene.add(staticGroup);
+    return toGroup(D);
+  });
+
+  // ---------------- the island: moss top, flesh in 1 m layers, belly over the void ----------------
+  const R = 47, lo = Math.floor(CENTER - R), hi = Math.ceil(CENTER + R);
+  const inBuilding = (x: number, z: number) => x >= 0 && z >= 0 && x < SIZE && z < SIZE;
+  const rebuildGround = part(() => {
+    const D = newMeshers();
+    // only columns with wounds need key lookups
+    const cols = new Set<number>();
+    for (const key of ws.all ? ws.all() : []) { const p = parseKey(key); if (p.L < 0 || (p.L === 0 && p.s === -1)) cols.add(p.x * 1000 + p.z); }
+    const solid = (x: number, z: number, k: number) => {
+      const n = groundLayers(x, z);
+      if (!n || k > n) return false;
+      return !cols.has(x * 1000 + z) || !ws.broken(groundKey(x, z, k));
+    };
+    for (let z = lo; z < hi; z++) {
+      // moss top outside the building, merged into runs
+      let run = -1;
+      for (let x = lo; x <= hi; x++) {
+        const ok = x < hi && !inBuilding(x, z) && solid(x, z, 0);
+        if (ok && run === -1) run = x;
+        if (!ok && run !== -1) { D.moss.box({ x0: run, y0: -SLAB, z0: z, x1: x, y1: 0, z1: z + 1 }, 'Y'); run = -1; }
+      }
+      for (let x = lo; x < hi; x++) {
+        const n = groundLayers(x, z);
+        if (!n) continue;
+        for (let k = 0; k <= n; k++) {
+          if (!solid(x, z, k)) continue;
+          const [yb, yt] = layerY(x, z, k);
+          const box = { x0: x, y0: yb, z0: z, x1: x + 1, y1: yt, z1: z + 1 };
+          // top: a dug-out cavity above (the top plate's own top is moss / the floor finish)
+          if (k > 0 && !solid(x, z, k - 1)) D.soil.box(box, 'Y');
+          // bottom: the belly, or the ceiling of a cavity below
+          if (k === n) D.belly.box(box, 'y', [0.7, 0.62, 0.66]);
+          else if (!solid(x, z, k + 1)) D.soil.box(box, 'y');
+          for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
+            const nx = x + dx, nz = z + dz, nn = groundLayers(nx, nz);
+            if (k > nn || nn === 0) { D.belly.box(box, f, [0.75, 0.66, 0.7], 0.6); continue; } // outer skin
+            if (!solid(nx, nz, k)) { D.soil.box(box, f, W, 0.8); continue; } // wall of a dug cavity
+            const nb = layerY(nx, nz, k)[0];
+            if (nb > yb + 1e-3) D.belly.box({ ...box, y1: nb }, f, [0.75, 0.66, 0.7], 0.6); // the neighbour is shallower
+          }
+        }
+      }
+    }
+    return toGroup(D);
+  });
 
   // ---------------- dynamic parts: per level (walls are tissue segments, slabs can be dug) ----------------
   const levelGroups: THREE.Group[] = [];
@@ -191,6 +218,14 @@ export function buildWorld(scene: THREE.Scene, ws: WorldState) {
           else if (!slab(x + dx, z + dz)) D.wound.box(b, f, W, 1); // holes and dug floors are open wounds
         }
       }
+    }
+    // bounce pads (glowing mushrooms)
+    for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
+      const c = g[z][x];
+      if ((c !== 'b' && c !== 'B') || ws.broken(blockKey(L, x, z, 0))) continue;
+      const e = c === 'B' ? 0.1 : 0;
+      D.stem.box({ x0: x + 0.38, y0: base, z0: z + 0.38, x1: x + 0.62, y1: base + 0.3, z1: z + 0.62 }, 'XxZz');
+      D.pad.box({ x0: x - e, y0: base + 0.3, z0: z - e, x1: x + 1 + e, y1: base + PAD_H, z1: z + 1 + e }, 'XxZzYy', W, 0.85);
     }
     // blocks: walls, window sills and lintels, door lintels, railings — all 0.9 m tissue blocks
     const solid = (x: number, z: number, sg: number) => blockAt(L, x, z, sg, ws);
@@ -272,7 +307,28 @@ export function buildWorld(scene: THREE.Scene, ws: WorldState) {
     doors.set(d.id, v);
   }
 
-  return { doors, rebuildLevel, materials: M };
+  for (const v of doors.values()) v.left.visible = v.right.visible = !ws.broken(doorKey(v.door));
+
+  /** the pickaxe changed these blocks: rebuild only what they touch */
+  function refresh(keys: Iterable<string>) {
+    const levels = new Set<number>();
+    let ground = false, shrooms = false;
+    for (const key of keys) {
+      if (key.startsWith('m.')) { shrooms = true; continue; }
+      const { L, s: sg } = parseKey(key);
+      if (L < 0) { ground = true; continue; }
+      if (L === 0 && sg === -1) ground = true;
+      levels.add(L);
+      if (sg === -1 && L > 0) levels.add(L - 1);
+      if (sg === 0) for (const v of doors.values()) if (doorKey(v.door) === key) v.left.visible = v.right.visible = !ws.broken(key);
+    }
+    for (const L of levels) rebuildLevel(L);
+    if (ground) rebuildGround();
+    if (shrooms) rebuildShrooms();
+    return { levels, ground };
+  }
+
+  return { doors, rebuildLevel, refresh, materials: M };
 }
 
 export function updateDoors(doors: Map<string, DoorView>, dt: number) {
@@ -364,7 +420,18 @@ export function buildCilia(scene: THREE.Scene, mobile: boolean) {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.frustumCulled = false;
   scene.add(mesh);
-  return { mesh, uniforms, count };
+  // dug-out ground takes its cilia with it (and they grow back with the ground)
+  const attr = geo.getAttribute('aBlade') as THREE.InstancedBufferAttribute;
+  const heights = pts.filter((_, i) => i % 4 === 2);
+  const refresh = (ws: WorldState) => {
+    const arr = attr.array as Float32Array;
+    for (let i = 0; i < count; i++) {
+      const x = Math.floor(arr[i * 4]), z = Math.floor(arr[i * 4 + 1]);
+      arr[i * 4 + 2] = ws.broken(blockKey(0, x, z, -1)) ? 0 : heights[i];
+    }
+    attr.needsUpdate = true;
+  };
+  return { mesh, uniforms, count, refresh };
 }
 
 // ---------------- the void below: dim spores drifting up ----------------

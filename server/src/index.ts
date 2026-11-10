@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { DEATH_Y, REBIRTH_MS, DOOR_BY_ID, FLOOR_H, PANEL_BY_ID, REGROW_MS, SEG_H, hardness, parseKey } from '../../shared/world';
+import { DEATH_Y, REBIRTH_MS, DOOR_BY_ID, PANEL_BY_ID, REGROW_MS, distToBox, keyBox, keyHardness } from '../../shared/world';
 import { MAX_SIZE, MAX_STROKE_NUMS, MIN_SIZE, type ClientMsg, type PlayerInfo, type PState, type ServerMsg, type StrokeData } from '../../shared/protocol';
 
 export interface Env {
@@ -474,15 +474,13 @@ export class World extends DurableObject<Env> {
         break;
       }
       case 'mine': {
-        if (typeof msg.k !== 'string' || !conn.s) return;
-        const { L, x, z, s: seg } = parseKey(msg.k);
-        if (![L, x, z, seg].every(Number.isInteger)) return;
-        const hard = hardness(L, x, z, seg);
+        if (typeof msg.k !== 'string' || msg.k.length > 40 || !conn.s) return;
+        const hard = keyHardness(msg.k);
         if (!hard || now - conn.mineT < hard * 700) return;
         const b = this.getBroken();
         if (b.has(msg.k)) return;
-        const cy = L * FLOOR_H + (seg < 0 ? -0.25 : (seg + 0.5) * SEG_H);
-        if (Math.hypot(conn.s[0] - (x + 0.5), conn.s[1] + 1.5 - cy, conn.s[2] - (z + 0.5)) > 7) return;
+        const box = keyBox(msg.k);
+        if (!box || distToBox(box, conn.s[0], conn.s[1] + 1.5, conn.s[2]) > 6.5) return;
         conn.mineT = now;
         const until = now + REGROW_MS;
         b.set(msg.k, until);

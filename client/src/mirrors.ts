@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Reflector } from 'three/examples/jsm/objects/Reflector.js';
-import { FLOOR_H, MIRRORS, PANEL_BY_ID } from '../../shared/world';
+import { FLOOR_H, MIRRORS, PANEL_BY_ID, SIZE, blockKey, type WorldState } from '../../shared/world';
 import { boneTex } from './textures';
 
 // Dance-class mirrors (see docs/MATERIALS.md). A live reflection is expensive (it renders the scene a
@@ -8,7 +8,7 @@ import { boneTex } from './textures';
 
 const LIVE_DIST = 14;
 
-interface MirrorView { reflector: Reflector; center: THREE.Vector3; level: number; normal: THREE.Vector3 }
+interface MirrorView { reflector: Reflector; center: THREE.Vector3; level: number; normal: THREE.Vector3; group: THREE.Group; id: string }
 
 export class Mirrors {
   views: MirrorView[] = [];
@@ -57,7 +57,7 @@ export class Mirrors {
       };
       group.add(reflector);
       scene.add(group);
-      this.views.push({ reflector, center, level: m.level, normal });
+      this.views.push({ reflector, center, level: m.level, normal, group, id: m.id });
     }
   }
 
@@ -67,6 +67,18 @@ export class Mirrors {
       const inFront = dx * v.normal.x + dz * v.normal.z > 0.1;
       const sameFloor = Math.abs(cam.y - (v.level * FLOOR_H + 1.6)) < 3;
       v.reflector.visible = inFront && sameFloor && Math.hypot(dx, cam.y - v.center.y, dz) < LIVE_DIST;
+    }
+  }
+
+  /** a mirror falls when the wall behind it is broken (and comes back when the tissue heals) */
+  refresh(ws: WorldState) {
+    for (const v of this.views) {
+      let whole = true;
+      for (let i = 18; i <= 22 && whole; i++) for (let sg = 0; sg <= 3 && whole; sg++) {
+        const key = v.id.endsWith('n') ? blockKey(v.level, i, 0, sg) : blockKey(v.level, SIZE - 1, i, sg);
+        if (ws.broken(key)) whole = false;
+      }
+      v.group.visible = whole;
     }
   }
 }

@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import './style.css';
 import qrcode from 'qrcode-generator';
 import { Mirrors } from './mirrors';
-import { Sfx, surfaceAt } from './sfx';
-import { CENTER, DOORS, REBIRTH_MS, FLOOR_H, ROOMS, SEG_H, SLAB, cellAt, hardness, isStair, onIsland, stairH, insideMirror, islandEdge, levelOfY, parseKey, raycastBlock, raycastPanels, raycastSolid, roomAt, type WorldState } from '../../shared/world';
+import { Sfx, surfaceAt, type Surface } from './sfx';
+import { CENTER, DOORS, REBIRTH_MS, FLOOR_H, ROOMS, cellAt, distToBox, isStair, keyBox, keyHardness, onIsland, insideMirror, islandEdge, levelOfY, parseKey, raycastBlock, raycastPanels, raycastSolid, roomAt, type WorldState } from '../../shared/world';
 import { F_CROUCH, F_DRAWING, F_MOVING, MAX_SIZE, MIN_SIZE, MAX_STROKE_NUMS, type PlayerInfo, type ServerMsg, type StrokeData } from '../../shared/protocol';
 import { buildCilia, buildVoid, buildWorld, updateDoors } from './world3d';
 import { Sky } from './sky';
@@ -184,7 +184,7 @@ const sky = new Sky(scene);
 const doorOpen = new Map<string, boolean>(DOORS.map((d) => [d.id, true]));
 const isDoorOpen = (id: string) => doorOpen.get(id) ?? true;
 const broken = new Set<string>();
-const ws: WorldState = { doorOpen: isDoorOpen, broken: (k) => broken.has(k) };
+const ws: WorldState = { doorOpen: isDoorOpen, broken: (k) => broken.has(k), all: () => broken };
 
 const world = buildWorld(scene, ws);
 const cilia = buildCilia(scene, IS_TOUCH);
@@ -617,16 +617,10 @@ function updateDrawing() {
 // ------------------------------------------------------------------ pickaxe
 // Hold to wound the tissue: wall segments (0.9 m) and floor plates. Takes `hardness` seconds,
 // the server checks reach + speed, everyone sees the wound, the organism heals it in 15 minutes.
-let mining: { key: string; t: number; need: number; L: number; x: number; z: number; s: number; lastHit: number } | null = null;
+let mining: { key: string; t: number; need: number; lastHit: number } | null = null;
 const hl = new THREE.Mesh(new THREE.BoxGeometry(1.02, 1, 1.02), new THREE.MeshBasicMaterial({ color: 0xff6fae, wireframe: true, transparent: true, opacity: 0.7, depthTest: false, fog: false }));
 hl.renderOrder = 11; hl.visible = false; scene.add(hl);
 
-function blockBox(L: number, x: number, z: number, s: number) {
-  const base = L * FLOOR_H;
-  const c = cellAt(L, x, z);
-  if (s === 0 && isStair(c)) return { y0: base, y1: base + stairH(c!) };
-  return s < 0 ? { y0: base - SLAB, y1: base } : { y0: base + s * SEG_H, y1: base + (s + 1) * SEG_H };
-}
 /** Q (any tool) or LMB with the pickaxe in hand */
 const qHeld = () => locked && keys.has('KeyQ');
 const pickInHand = () => tool === PICK || qHeld();
@@ -644,22 +638,24 @@ function updateMining(dt: number) {
     target = raycastBlock(o.x, o.y, o.z, tmpDir.x, tmpDir.y, tmpDir.z, 5.5, ws);
   }
   if (target) {
-    const b = blockBox(target.L, target.x, target.z, target.s);
+    const b = keyBox(target.key)!;
     hl.visible = true;
-    hl.position.set(target.x + 0.5, (b.y0 + b.y1) / 2, target.z + 0.5);
-    hl.scale.set(1, (b.y1 - b.y0) + 0.02, 1);
+    hl.position.set((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, (b.z0 + b.z1) / 2);
+    hl.scale.set(b.x1 - b.x0 + 0.02, b.y1 - b.y0 + 0.02, b.z1 - b.z0 + 0.02);
   } else hl.visible = false;
   // the swing never waits: you see and hear the pickaxe working the moment you press
   if (want && active) held.swing += dt; else held.swing = 0;
   if (!want || !target) { mining = null; $('mine-bar').classList.add('hidden'); return; }
-  if (!mining || mining.key !== target.key) mining = { key: target.key, t: 0, need: hardness(target.L, target.x, target.z, target.s), L: target.L, x: target.x, z: target.z, s: target.s, lastHit: 0 };
+  if (!mining || mining.key !== target.key) mining = { key: target.key, t: 0, need: keyHardness(target.key), lastHit: 0 };
   mining.t += dt;
   const now = performance.now();
   if (now - mining.lastHit > 110) {
     mining.lastHit = now;
     const o = camera.position;
-    chips(o.x + tmpDir.x * (target.t - 0.05), o.y + tmpDir.y * (target.t - 0.05), o.z + tmpDir.z * (target.t - 0.05), target.s < 0 ? 0xc8b8a0 : 0xff8fb8, 4);
-    sfx.pick(target.s < 0 ? floorSurface(target.L, target.x, target.z) : 'membrane');
+    const hx = o.x + tmpDir.x * (target.t - 0.05), hy = o.y + tmpDir.y * (target.t - 0.05), hz = o.z + tmpDir.z * (target.t - 0.05);
+    const surf = keySurface(target.key, hx, hy, hz);
+    chips(hx, hy, hz, CHIP_COLOR[surf] ?? 0xff8fb8, 4);
+    sfx.pick(surf);
     shake = 0.012;
   }
   $('mine-bar').classList.remove('hidden');
@@ -667,8 +663,8 @@ function updateMining(dt: number) {
   if (mining.t >= mining.need) {
     net?.send({ t: 'mine', k: mining.key });
     applyBroken(mining.key, true); // optimistic; the server confirms or heals it back
-    const bb = blockBox(target.L, target.x, target.z, target.s);
-    chips(target.x + 0.5, (bb.y0 + bb.y1) / 2, target.z + 0.5, 0xff4f7a, 14);
+    const bb = keyBox(target.key)!;
+    chips((bb.x0 + bb.x1) / 2, (bb.y0 + bb.y1) / 2, (bb.z0 + bb.z1) / 2, 0xff4f7a, 14);
     sfx.tear();
     shake = 0.03;
     mining = null;
@@ -705,16 +701,34 @@ function updateChips(dt: number) {
   }
   chipMesh.instanceMatrix.needsUpdate = true;
 }
-function floorSurface(L: number, x: number, z: number) {
-  return surfaceAt(x + 0.5, L * FLOOR_H, z + 0.5);
-}
-function applyBroken(key: string, isBroken: boolean) {
-  if (isBroken === broken.has(key)) return;
-  if (isBroken) broken.add(key); else broken.delete(key);
+const CHIP_COLOR: Partial<Record<Surface, number>> = { soil: 0x6a4a3a, cilia: 0x3a8a7a, nacre: 0xd8e8f0, felt: 0xc89050, roe: 0xb48cff, flesh: 0xff5070, bone: 0xe8dcc4, scales: 0x4a5070, vertebra: 0xe8dcc4 };
+/** what the pickaxe is biting into (for the sound and the chips) */
+function keySurface(key: string, x: number, y: number, z: number): Surface {
+  if (key.startsWith('m.')) return 'flesh';
   const { L, s } = parseKey(key);
-  world.rebuildLevel(L);
-  if (s < 0 && L > 0) world.rebuildLevel(L - 1);
-  paint.refreshMasks(L);
+  if (L < 0) return 'soil';
+  if (s === -1) return L === 0 ? surfaceAt(x, 0, z) : surfaceAt(x, L * FLOOR_H, z);
+  const c = cellAt(L, Math.floor(x), Math.floor(z));
+  if (isStair(c)) return 'vertebra';
+  if (c === 'b' || c === 'B') return 'flesh';
+  if (c === 'r') return 'bone';
+  return 'membrane';
+}
+/** blocks changed: update state and rebuild only the touched parts */
+function applyBroken(key: string | string[], isBroken: boolean) {
+  const changed: string[] = [];
+  for (const k of Array.isArray(key) ? key : [key]) {
+    if (isBroken === broken.has(k)) continue;
+    if (isBroken) broken.add(k); else broken.delete(k);
+    changed.push(k);
+  }
+  if (changed.length) refreshWorld(changed);
+}
+function refreshWorld(keys: string[]) {
+  const { levels, ground } = world.refresh(keys);
+  for (const L of levels) paint.refreshMasks(L);
+  if (ground) cilia.refresh(ws);
+  mirrors.refresh(ws);
 }
 
 // held item: a bone pickaxe or the brush, low in the right corner, swings while working
@@ -799,11 +813,10 @@ function onMsg(m: ServerMsg) {
       for (const [id, open] of Object.entries(m.doors)) applyDoor(id, open);
       {
         const keys = new Set(m.broken.map(([k]) => k));
-        const levels = new Set<number>();
-        for (const k of [...broken, ...keys]) if (broken.has(k) !== keys.has(k)) { const { L, s } = parseKey(k); levels.add(L); if (s < 0 && L > 0) levels.add(L - 1); }
+        const diff = [...broken, ...keys].filter((k) => broken.has(k) !== keys.has(k));
         broken.clear();
         for (const k of keys) broken.add(k);
-        for (const L of levels) { world.rebuildLevel(L); paint.refreshMasks(L); }
+        if (diff.length) refreshWorld(diff);
       }
       Object.assign(panelCounts, m.panels);
       paint.loadAll(API, m.panels, { x: player.x, y: player.y, z: player.z });
@@ -843,19 +856,14 @@ function onMsg(m: ServerMsg) {
     case 'broken':
       applyBroken(m.k, true);
       if (m.by !== me?.id) {
-        const { L, x, z, s } = parseKey(m.k);
-        const d = Math.hypot(x + 0.5 - player.x, L * FLOOR_H + Math.max(0, s) * SEG_H - player.y, z + 0.5 - player.z);
+        const b = keyBox(m.k);
+        const d = b ? distToBox(b, player.x, player.y + 1, player.z) : 99;
         if (d < 18) sfx.tear(Math.pow(1 - d / 18, 2));
       }
       break;
     case 'heal': {
-      let near = false;
-      for (const k of m.k) {
-        applyBroken(k, false);
-        const { L, x, z } = parseKey(k);
-        if (Math.hypot(x - player.x, L * FLOOR_H - player.y, z - player.z) < 14) near = true;
-      }
-      if (near) sfx.heal();
+      applyBroken(m.k, false);
+      if (m.k.some((k) => { const b = keyBox(k); return b && distToBox(b, player.x, player.y + 1, player.z) < 14; })) sfx.heal();
       break;
     }
     case 'dead':
