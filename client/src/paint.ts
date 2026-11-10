@@ -168,7 +168,7 @@ export class PaintLayer {
     const W = Math.round(panel.w);
     const mask = new THREE.DataTexture(new Uint8Array(W * SEGS * 4), W, SEGS);
     mask.magFilter = mask.minFilter = THREE.NearestFilter;
-    const mat = new THREE.MeshLambertMaterial({ map: tex, emissiveMap: tex, alphaMap: mask, emissive: 0xffffff, emissiveIntensity: 0.4, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    const mat = new THREE.MeshLambertMaterial({ map: tex, emissiveMap: tex, alphaMap: mask, emissive: 0xffffff, emissiveIntensity: 0.6, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(panel.w, panel.h), mat);
     mesh.position.set(
       panel.ox + panel.ux * panel.w / 2 + panel.nx * 0.004,

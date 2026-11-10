@@ -78,7 +78,7 @@ export function buildWorld(scene: THREE.Scene, ws: WorldState) {
     // frame: bone, faint marrow veins
     bone: living(lam(boneTex()), { veins: 0.25, veinColor: 0xffc890, veinScale: 1.6, halo: 0.35, haloColor: 0xffe0b0, reach: 3.5, base: 0.05 }),
     // canvas walls: membrane, strong veins that follow people
-    membrane: living(lam(membraneTex()), { veins: 1, veinColor: 0xff5c9a, veinScale: 1, halo: 0.45, haloColor: 0xffb8d0, reach: 4.5, base: 0.03 }),
+    membrane: living(lam(membraneTex()), { veins: 0.22, veinColor: 0xff7aa8, veinScale: 3, halo: 0.35, haloColor: 0xffc8dc, reach: 4, base: 0.14 }),
     // facade: dark scales, iridescent, tendons glow when someone is near (climb)
     scales: living(lam(scalesTex()), { veins: 0.45, veinColor: 0x6af0d0, veinScale: 2.2, halo: 0.45, haloColor: 0x60ffd8, reach: 5, iridescence: 0.6, base: 0.02 }),
     // ground floor: nacre, rings of light spread from footsteps

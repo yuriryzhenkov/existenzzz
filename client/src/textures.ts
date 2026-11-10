@@ -47,10 +47,9 @@ export function boneTex() {
 /** MEMBRANE (interior walls = the canvas): pale translucent skin with faint capillaries */
 export function membraneTex() {
   return makeTex((ctx, r) => {
-    const base: RGB = [226, 208, 214];
-    fill(ctx, r, base, 0.95, 0.06);
-    let x = r() * 16, y = 0, a = Math.PI / 2;
-    for (let i = 0; i < 26; i++) { px(ctx, Math.floor(x) & 15, Math.floor(y) & 15, shade([204, 160, 176], 0.95 + r() * 0.05)); a += (r() - 0.5) * 1.4; x += Math.cos(a); y += Math.sin(a); }
+    // a calm canvas: almost flat, only a faint grain, so paint reads clearly on it
+    const base: RGB = [214, 204, 212];
+    fill(ctx, r, base, 0.97, 0.03);
   }, 202);
 }
 
