@@ -29,140 +29,122 @@ const fill = (ctx: CanvasRenderingContext2D, r: () => number, base: RGB, lo: num
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) px(ctx, x, y, shade(base, lo + r() * span));
 };
 
-/** Monolithic concrete: formwork board joints every 25cm + tie holes */
-export function concreteTex() {
+// ---- EXISTENZZZ tissues (see docs/CONCEPT.md). Same roles as a building, grown by an organism. ----
+
+/** BONE (the frame: slabs, bands, sills, lintels): ivory, porous like trabecular bone */
+export function boneTex() {
   return makeTex((ctx, r) => {
-    const base: RGB = [158, 156, 152];
+    const base: RGB = [214, 204, 182];
     fill(ctx, r, base, 0.9, 0.12);
-    for (let x = 0; x < 16; x++) { px(ctx, x, 0, shade(base, 0.84)); px(ctx, x, 8, shade(base, 0.86)); }
-    px(ctx, 4, 4, shade(base, 0.55)); px(ctx, 12, 12, shade(base, 0.55));
-    for (let i = 0; i < 3; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), shade(base, 0.78));
-  }, 101);
+    for (let i = 0; i < 9; i++) {
+      const x = Math.floor(r() * 16), y = Math.floor(r() * 16);
+      px(ctx, x, y, shade(base, 0.62)); if (r() < 0.5) px(ctx, (x + 1) & 15, y, shade(base, 0.72));
+    }
+    for (let x = 0; x < 16; x++) if (r() < 0.6) px(ctx, x, 7, shade(base, 0.86)); // growth line
+  }, 201);
 }
 
-/** Lime plaster: near-white, very subtle trowel unevenness — the canvas */
-export function plasterTex() {
+/** MEMBRANE (interior walls = the canvas): pale translucent skin with faint capillaries */
+export function membraneTex() {
   return makeTex((ctx, r) => {
-    const base: RGB = [236, 232, 224];
-    fill(ctx, r, base, 0.965, 0.045);
-    for (let i = 0; i < 4; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), shade(base, 0.93));
-  }, 102);
+    const base: RGB = [226, 208, 214];
+    fill(ctx, r, base, 0.95, 0.06);
+    let x = r() * 16, y = 0, a = Math.PI / 2;
+    for (let i = 0; i < 26; i++) { px(ctx, Math.floor(x) & 15, Math.floor(y) & 15, shade([204, 160, 176], 0.95 + r() * 0.05)); a += (r() - 0.5) * 1.4; x += Math.cos(a); y += Math.sin(a); }
+  }, 202);
 }
 
-/** Red brick, 25x6.5cm bricks with mortar (approximated to the 16px/m grid) */
-export function brickTex() {
+/** SCALES (outer skin / facade): dark iridescent scales with vertical tendons to climb on */
+export function scalesTex() {
   return makeTex((ctx, r) => {
-    const brick: RGB = [150, 68, 52], mortar: RGB = [196, 186, 170];
+    const base: RGB = [58, 64, 82];
     for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-      const row = Math.floor(y / 2);
-      const off = row % 2 ? 2 : 0;
-      const isMortarH = y % 2 === 1;
-      const isMortarV = (x + off) % 4 === 3;
-      px(ctx, x, y, isMortarH || isMortarV ? shade(mortar, 0.92 + r() * 0.08) : shade(brick, 0.85 + r() * 0.2));
+      const row = Math.floor(y / 4), off = row % 2 ? 2 : 0;
+      const lx = (x + off) % 4, ly = y % 4;
+      const edge = ly === 3 || (ly === 2 && (lx === 0 || lx === 3));
+      px(ctx, x, y, shade(base, edge ? 0.6 : 0.95 + (3 - ly) * 0.06 + r() * 0.06));
     }
-  }, 103);
+    for (let y = 0; y < 16; y++) { px(ctx, 7, y, shade([150, 92, 96], 0.9 + r() * 0.15)); if (r() < 0.5) px(ctx, 8, y, shade([150, 92, 96], 0.75)); } // tendon
+  }, 203);
 }
 
-/** Polished concrete screed (ground floor): lighter, with aggregate specks */
-export function screedTex() {
+/** NACRE (ground floor): mother-of-pearl, soft bands; iridescence is added in the shader */
+export function nacreTex() {
   return makeTex((ctx, r) => {
-    const base: RGB = [176, 172, 166];
-    fill(ctx, r, base, 0.94, 0.08);
-    for (let i = 0; i < 10; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), shade(base, r() < 0.5 ? 0.8 : 1.1));
-    for (let x = 0; x < 16; x++) px(ctx, x, 15, shade(base, 0.86)); // expansion joint every metre
-  }, 104);
-}
-
-/** Oak plank parquet: 4 planks per metre, staggered butt joints */
-export function oakTex() {
-  return makeTex((ctx, r) => {
-    const base: RGB = [168, 122, 78];
-    for (let y = 0; y < 16; y++) {
-      const plank = Math.floor(y / 4);
-      const tone = 0.88 + ((plank * 7) % 3) * 0.05;
-      for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, tone + (y % 4 === 1 && r() < 0.3 ? -0.06 : 0) + r() * 0.05));
-      if (y % 4 === 3) for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, 0.66));
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const band = Math.sin((x + y * 0.6) * 0.8 + r() * 0.3) * 0.5 + 0.5;
+      px(ctx, x, y, shade([196 + band * 20, 200, 214 - band * 12] as RGB, 0.9 + r() * 0.06));
     }
-    for (let p = 0; p < 4; p++) { const x = (p * 5 + 3) % 16; for (let y = p * 4; y < p * 4 + 3; y++) px(ctx, x, y, shade(base, 0.68)); }
-  }, 105);
+  }, 204);
 }
 
-/** Solid oak for handrails, treads, door leaves: long grain */
-export function woodTex() {
+/** FELT (upper floors): dense hyphal felt, amber fibres crossing */
+export function feltTex() {
   return makeTex((ctx, r) => {
-    const base: RGB = [150, 104, 64];
-    for (let y = 0; y < 16; y++) {
-      const g = 0.86 + Math.sin(y * 1.7 + r()) * 0.06;
-      for (let x = 0; x < 16; x++) px(ctx, x, y, shade(base, g + r() * 0.04));
+    const base: RGB = [150, 112, 70];
+    fill(ctx, r, base, 0.8, 0.12);
+    for (let i = 0; i < 10; i++) {
+      let x = r() * 16, y = r() * 16; const a = r() * Math.PI;
+      for (let k = 0; k < 6; k++) { px(ctx, Math.floor(x) & 15, Math.floor(y) & 15, shade([206, 160, 96], 0.85 + r() * 0.2)); x += Math.cos(a); y += Math.sin(a); }
     }
-  }, 106);
+  }, 205);
 }
 
-/** Soil with moss — where the mycelium came up through the floor */
+/** CARTILAGE (stair treads on the vertebrae, handrail caps): translucent blue-white */
+export function cartilageTex() {
+  return makeTex((ctx, r) => {
+    fill(ctx, r, [196, 214, 222], 0.9, 0.1);
+    for (let x = 0; x < 16; x++) px(ctx, x, (x * 3) % 16, shade([170, 196, 210], 0.9));
+  }, 206);
+}
+
+/** SINEW (handrails, door lips): red-brown striated fibre */
+export function sinewTex() {
+  return makeTex((ctx, r) => {
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) px(ctx, x, y, shade([150, 70, 72], 0.75 + ((y + Math.floor(r() * 2)) % 3) * 0.1 + r() * 0.05));
+  }, 207);
+}
+
+/** ROE (roof): dark bed of translucent spore-eggs */
+export function roeTex() {
+  return makeTex((ctx, r) => {
+    fill(ctx, r, [40, 36, 52], 0.85, 0.2);
+    for (let i = 0; i < 9; i++) {
+      const x = Math.floor(r() * 15), y = Math.floor(r() * 15);
+      ctx.fillStyle = shade([150, 120, 190], 0.8 + r() * 0.3); ctx.fillRect(x, y, 2, 2);
+      px(ctx, x, y, '#e8dcff');
+    }
+  }, 208);
+}
+
+/** LIVING SOIL (atrium, where the organism roots) */
 export function soilTex() {
   return makeTex((ctx, r) => {
-    const soil: RGB = [92, 70, 52], moss: RGB = [88, 112, 64];
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-      const m = r() < 0.45;
-      px(ctx, x, y, shade(m ? moss : soil, 0.82 + r() * 0.25));
-    }
-    for (let i = 0; i < 4; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), '#e8e2d4'); // mycelium threads
-  }, 107);
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) px(ctx, x, y, shade(r() < 0.4 ? [56, 72, 70] : [62, 46, 52], 0.8 + r() * 0.3));
+    for (let i = 0; i < 4; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), '#9fe8d0');
+  }, 209);
 }
 
-/** Bitumen roofing with gravel */
-export function roofTex() {
+/** MOSS-FLESH (island surface under the cilia) */
+export function mossTex() {
   return makeTex((ctx, r) => {
-    const base: RGB = [84, 82, 86];
-    fill(ctx, r, base, 0.85, 0.2);
-    for (let i = 0; i < 18; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), shade([150, 144, 136], 0.8 + r() * 0.3));
-  }, 108);
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) px(ctx, x, y, shade(r() < 0.5 ? [40, 70, 66] : [52, 58, 74], 0.75 + r() * 0.3));
+  }, 210);
 }
 
-/** Concrete eaten by mycelium: grey with sparse, irregular whitish hyphae (low contrast, no motif) */
-export function myceliumTex() {
-  const t = makeTex((ctx, r) => {
-    const base: RGB = [150, 148, 144];
-    fill(ctx, r, base, 0.86, 0.14, 32, 32);
-    for (let t = 0; t < 7; t++) {
-      let x = r() * 32, y = r() * 32, a = r() * Math.PI * 2;
-      const len = 4 + r() * 10;
-      for (let i = 0; i < len; i++) {
-        px(ctx, Math.floor(x) & 31, Math.floor(y) & 31, shade([226, 222, 212], 0.9 + r() * 0.12));
-        a += (r() - 0.5) * 1.2; x += Math.cos(a); y += Math.sin(a);
-      }
-    }
-  }, 109, 32);
-  t.repeat.set(0.5, 0.5); // 32px over 2m keeps the world-wide 16px/m pixel density
-  return t;
-}
-
-export function grassTex() {
+/** Exposed tissue at wounds and floor holes: raw, glossy red under the bone */
+export function woundTex() {
   return makeTex((ctx, r) => {
-    const base: RGB = [92, 124, 76];
-    fill(ctx, r, base, 0.82, 0.3);
-    for (let i = 0; i < 6; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), shade([120, 156, 90], 0.9 + r() * 0.2));
-  }, 21);
+    fill(ctx, r, [150, 52, 66], 0.8, 0.25);
+    for (let i = 0; i < 6; i++) px(ctx, Math.floor(r() * 16), Math.floor(r() * 16), '#f0b0b8');
+  }, 211);
 }
 
-/** Plain oak door leaf: stiles, rails and a recessed panel, brass handle */
-export function doorTex() {
-  const c = document.createElement('canvas');
-  c.width = 32; c.height = 48;
-  const ctx = c.getContext('2d')!;
-  const r = rng(41);
-  const base: RGB = [140, 98, 60];
-  for (let y = 0; y < 48; y++) for (let x = 0; x < 32; x++) px(ctx, x, y, shade(base, 0.88 + Math.sin(x * 1.3) * 0.03 + r() * 0.05));
-  ctx.strokeStyle = shade(base, 0.68);
-  ctx.lineWidth = 1;
-  ctx.strokeRect(5.5, 5.5, 21, 16);
-  ctx.strokeRect(5.5, 26.5, 21, 16);
-  ctx.fillStyle = '#c9a24a'; ctx.fillRect(27, 23, 2, 3);
-  const t = new THREE.CanvasTexture(c);
-  t.magFilter = THREE.NearestFilter;
-  t.minFilter = THREE.NearestFilter;
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
+/** door lips: two halves of membrane flesh */
+export function lipTex() {
+  return makeTex((ctx, r) => {
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) px(ctx, x, y, shade([170, 96, 112], 0.8 + Math.sin(y * 0.9) * 0.08 + r() * 0.08));
+  }, 212);
 }
 
 export function capTex(base: [number, number, number], spot = '#fff4e6', seed = 51) {

@@ -44,9 +44,22 @@
       <div id="stick-zone"><div id="stick-base"><div id="stick-knob"></div></div></div>
       <div id="touch-buttons">
         <button id="t-draw" class="tbtn" title="рисовать">✎</button>
+        <button id="t-pick" class="tbtn" title="кирка">⛏</button>
         <button id="t-door" class="tbtn" title="дверь">⌂</button>
         <button id="t-crouch" class="tbtn" title="присесть">▾</button>
         <button id="t-jump" class="tbtn big" title="прыжок">▲</button>
+      </div>
+    </div>
+
+    <div id="mine-bar" class="hidden"><i></i></div>
+    <div id="edge-warn" class="hidden">край острова · дальше бездна</div>
+    <div id="sky-label" class="hud"></div>
+
+    <div id="death" class="overlay hidden">
+      <div class="card death-card">
+        <h1>бездна забрала тебя</h1>
+        <p>навсегда.</p>
+        <p class="muted small">организм помнит всё нарисованное тобой. тебя — уже нет.</p>
       </div>
     </div>
 
@@ -56,14 +69,14 @@
         <div class="keys">
           <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> идти</div>
           <div><kbd>мышь</kbd> смотреть</div>
-          <div><kbd>ЛКМ</kbd> рисовать на стене</div>
-          <div><kbd>Space</kbd> прыжок · <kbd>Shift</kbd>/<kbd>C</kbd> присесть</div>
-          <div><kbd>E</kbd> открыть / закрыть дверь</div>
-          <div><kbd>1</kbd>–<kbd>5</kbd> инструмент · <kbd>колесо</kbd> размер</div>
+          <div><kbd>Shift</kbd> бежать · <kbd>Ctrl</kbd>/<kbd>C</kbd> присесть · <kbd>Space</kbd> прыжок</div>
+          <div><kbd>1</kbd> кисть · <kbd>2</kbd> кирка · <kbd>ЛКМ</kbd> держать</div>
+          <div><kbd>W</kbd> в стену снаружи — лезть по сухожилиям</div>
+          <div><kbd>E</kbd> губы-двери · <kbd>колесо</kbd> размер кисти</div>
           <div><kbd>Q</kbd>/<kbd>R</kbd> цвет · <kbd>Tab</kbd> курсор для палитры</div>
           <div><kbd>M</kbd> музыка · <kbd>N</kbd> шаги · <kbd>Esc</kbd> пауза</div>
         </div>
-        <p class="hint">Рисовать можно. Стирать — нельзя. Всё, что ты оставишь, останется.<br />Светящиеся зелёные грибы подбрасывают. В полу бывают дыры. Посмотри наверх.</p>
+        <p class="hint">Ты — клетка внутри живого организма. Он чувствует тебя: жилки тянутся к шагам.<br />Рисуй на мембранах — стереть нельзя. Киркой можно ранить ткань — через 15 минут она зарастёт.<br />Шляпки подбрасывают. Снаружи по фасаду можно забраться на крышу.<br /><b>Остров висит над бездной. Упадёшь — умрёшь навсегда.</b></p>
         <button id="rename" class="link">сменить имя</button> · <button id="logout" class="link">выйти из аккаунта</button>
       </div>
     </div>
@@ -74,7 +87,7 @@
           <div class="shroom"></div>
           <h1>EXISTENZZZ</h1>
         </div>
-        <p class="tag">общее пространство. ходи, рисуй, слушай.<br />рисовать можно — стирать нельзя.</p>
+        <p class="tag">живой организм над бездной. ходи, рисуй, слушай.<br />рисовать можно — стирать нельзя. упасть — значит умереть.</p>
         <div id="login-desktop" class="hidden">
           <canvas id="tg-qr" width="232" height="232"></canvas>
           <p class="small">Наведи камеру телефона на код —<br />откроется бот, нажми «Старт».</p>

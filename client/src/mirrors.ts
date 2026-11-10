@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Reflector } from 'three/examples/jsm/objects/Reflector.js';
 import { FLOOR_H, MIRRORS, PANEL_BY_ID } from '../../shared/world';
-import { woodTex } from './textures';
+import { boneTex } from './textures';
 
 // Dance-class mirrors (see docs/MATERIALS.md). A live reflection is expensive (it renders the scene a
 // second time), so only mirrors close to you on your floor are "live"; the rest show a static silvered pane.
@@ -14,7 +14,7 @@ export class Mirrors {
   views: MirrorView[] = [];
 
   constructor(scene: THREE.Scene, mobile: boolean, onReflect: (on: boolean) => void) {
-    const frameMat = new THREE.MeshLambertMaterial({ map: woodTex() });
+    const frameMat = new THREE.MeshLambertMaterial({ map: boneTex() });
     const backMat = new THREE.MeshLambertMaterial({ color: 0x8e959c }); // silvered glass seen from afar
     const tw = mobile ? 320 : 640;
     for (const m of MIRRORS) {

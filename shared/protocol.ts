@@ -1,5 +1,6 @@
 // Wire protocol shared between client and server (JSON over WebSocket).
 
+// old strokes may still use tools 1..4; the client now offers only the brush (0) and the pickaxe (not a stroke)
 export const TOOLS = ['brush', 'marker', 'spray', 'pixel', 'spores'] as const;
 export type ToolId = 0 | 1 | 2 | 3 | 4;
 export const MAX_SIZE = 80; // cm
@@ -25,10 +26,15 @@ export type ClientMsg =
   | { t: 's'; p: string; d: StrokeData }
   | { t: 'door'; id: string }
   | { t: 'rename'; name: string }
+  | { t: 'mine'; k: string }
   | { t: 'ping' };
 
 export type ServerMsg =
-  | { t: 'welcome'; you: PlayerInfo; players: PlayerInfo[]; states: PState[]; doors: Record<string, boolean>; panels: Record<string, number>; strokes: number }
+  | { t: 'welcome'; you: PlayerInfo; players: PlayerInfo[]; states: PState[]; doors: Record<string, boolean>; panels: Record<string, number>; strokes: number; broken: [string, number][] }
+  | { t: 'broken'; k: string; by: string; until: number }
+  | { t: 'heal'; k: string[] }
+  | { t: 'dead' }
+  | { t: 'died'; id: string; name: string }
   | { t: 'join'; p: PlayerInfo }
   | { t: 'leave'; id: string }
   | { t: 'ps'; d: PState[] }

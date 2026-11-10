@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { PANELS, PANEL_BY_ID, type Panel } from '../../shared/world';
+import { PANELS, PANEL_BY_ID, SEGS, blockKey, type Panel } from '../../shared/world';
 import type { StrokeData } from '../../shared/protocol';
 
 export const PX_PER_M = 40;
@@ -18,6 +18,12 @@ interface PanelView {
   tex: THREE.CanvasTexture;
   mesh: THREE.Mesh;
   dirty: boolean;
+  mask: THREE.DataTexture; // 1 texel per wall cell × segment: broken tissue takes the paint with it
+}
+
+/** the wall cell behind panel column i */
+function cellOf(p: Panel, i: number) {
+  return { x: Math.floor(p.ox + p.ux * (i + 0.5) - p.nx * 0.5), z: Math.floor(p.oz + p.uz * (i + 0.5) - p.nz * 0.5) };
 }
 
 /** Draw segment i of a stroke (cm coords in panel space) */
@@ -119,9 +125,29 @@ export class PaintLayer {
   loaded = new Set<string>();
   group = new THREE.Group();
   mat?: THREE.Material;
+  isBroken: (key: string) => boolean = () => false;
 
   constructor(scene: THREE.Scene) {
     scene.add(this.group);
+  }
+
+  private fillMask(v: PanelView) {
+    const d = v.mask.image.data as Uint8Array;
+    const W = v.mask.image.width;
+    for (let i = 0; i < W; i++) {
+      const c = cellOf(v.panel, i);
+      for (let sg = 0; sg < SEGS; sg++) {
+        const o = (sg * W + i) * 4;
+        const a = this.isBroken(blockKey(v.panel.level, c.x, c.z, sg)) ? 0 : 255;
+        d[o] = d[o + 1] = d[o + 2] = a; d[o + 3] = 255;
+      }
+    }
+    v.mask.needsUpdate = true;
+  }
+
+  /** a block broke or healed: update masks of the panels on that level */
+  refreshMasks(level: number) {
+    for (const v of this.views.values()) if (v.panel.level === level) this.fillMask(v);
   }
 
   view(id: string): PanelView | null {
@@ -139,7 +165,10 @@ export class PaintLayer {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 4;
     // paint is lit like the wall, plus part of its own colour, so it reads as the swatch you picked even in shade
-    const mat = new THREE.MeshLambertMaterial({ map: tex, emissiveMap: tex, emissive: 0xffffff, emissiveIntensity: 0.4, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    const W = Math.round(panel.w);
+    const mask = new THREE.DataTexture(new Uint8Array(W * SEGS * 4), W, SEGS);
+    mask.magFilter = mask.minFilter = THREE.NearestFilter;
+    const mat = new THREE.MeshLambertMaterial({ map: tex, emissiveMap: tex, alphaMap: mask, emissive: 0xffffff, emissiveIntensity: 0.4, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(panel.w, panel.h), mat);
     mesh.position.set(
       panel.ox + panel.ux * panel.w / 2 + panel.nx * 0.004,
@@ -151,7 +180,8 @@ export class PaintLayer {
     mesh.updateMatrix();
     mesh.renderOrder = 1;
     this.group.add(mesh);
-    v = { panel, canvas, ctx, tex, mesh, dirty: false };
+    v = { panel, canvas, ctx, tex, mesh, dirty: false, mask };
+    this.fillMask(v);
     this.views.set(id, v);
     return v;
   }

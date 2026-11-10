@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { DOOR_BY_ID, PANEL_BY_ID } from '../../shared/world';
+import { DEATH_Y, DOOR_BY_ID, FLOOR_H, PANEL_BY_ID, REGROW_MS, SEG_H, hardness, parseKey } from '../../shared/world';
 import { MAX_SIZE, MAX_STROKE_NUMS, MIN_SIZE, type ClientMsg, type PlayerInfo, type PState, type ServerMsg, type StrokeData } from '../../shared/protocol';
 
 export interface Env {
@@ -7,6 +7,7 @@ export interface Env {
   BOT_TOKEN?: string;
   BOT_USERNAME?: string;
   SESSION_SECRET?: string;
+  ADMIN_KEY?: string;
 }
 
 const CORS = {
@@ -195,6 +196,10 @@ export default {
         fwd.searchParams.set('u', JSON.stringify(user));
         return world().fetch(new Request(fwd, req));
       }
+      case '/api/admin/revive': {
+        if (!env.ADMIN_KEY || url.searchParams.get('key') !== env.ADMIN_KEY) return json({ error: 'forbidden' }, 403);
+        return world().fetch(new Request('https://world/admin/revive?uid=' + encodeURIComponent(url.searchParams.get('uid') || '')));
+      }
       case '/api/panels':
       case '/api/stats':
         return world().fetch(new Request('https://world' + url.pathname + url.search));
@@ -217,6 +222,7 @@ interface Conn {
   bucket: number; // stroke rate limit tokens
   bucketT: number;
   doorT: number;
+  mineT: number;
 }
 
 export class World extends DurableObject<Env> {
@@ -227,6 +233,7 @@ export class World extends DurableObject<Env> {
   panelCounts: Map<string, number> | null = null;
   doors: Map<string, boolean> | null = null;
   totalStrokes = 0;
+  brokenMap: Map<string, number> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -236,10 +243,12 @@ export class World extends DurableObject<Env> {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS doors (id TEXT PRIMARY KEY, open INTEGER NOT NULL)`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS logins (code TEXT PRIMARY KEY, created INTEGER NOT NULL, user TEXT)`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, name TEXT NOT NULL)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS dead (uid TEXT PRIMARY KEY, name TEXT, t INTEGER NOT NULL)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS broken (k TEXT PRIMARY KEY, until INTEGER NOT NULL, uid TEXT)`);
     // restore connections after hibernation
     for (const ws of ctx.getWebSockets()) {
       const a = ws.deserializeAttachment() as Attach | null;
-      if (a) this.conns.set(ws, { ws, info: a.info, s: a.s, lastPersist: 0, bucket: 40, bucketT: Date.now(), doorT: 0 });
+      if (a) this.conns.set(ws, { ws, info: a.info, s: a.s, lastPersist: 0, bucket: 40, bucketT: Date.now(), doorT: 0, mineT: 0 });
     }
   }
 
@@ -263,9 +272,54 @@ export class World extends DurableObject<Env> {
     return this.doors;
   }
 
+  getBroken() {
+    if (!this.brokenMap) {
+      this.brokenMap = new Map();
+      for (const r of this.sql.exec<{ k: string; until: number }>(`SELECT k, until FROM broken`)) this.brokenMap.set(r.k, r.until);
+    }
+    return this.brokenMap;
+  }
+
+  /** living tissue heals: wounded blocks regrow after REGROW_MS */
+  async alarm() {
+    const now = Date.now();
+    const b = this.getBroken();
+    const healed: string[] = [];
+    for (const [k, until] of b) if (until <= now) { healed.push(k); b.delete(k); }
+    if (healed.length) {
+      this.sql.exec(`DELETE FROM broken WHERE until <= ?`, now);
+      this.broadcast({ t: 'heal', k: healed });
+    }
+    this.scheduleHeal();
+  }
+  scheduleHeal() {
+    let next = Infinity;
+    for (const until of this.getBroken().values()) next = Math.min(next, until);
+    if (next < Infinity) this.ctx.storage.setAlarm(Math.max(Date.now() + 500, next));
+  }
+
+  isDead(uid: string) {
+    return [...this.sql.exec(`SELECT uid FROM dead WHERE uid = ?`, uid)].length > 0;
+  }
+  kill(conn: Conn) {
+    this.sql.exec(`INSERT OR REPLACE INTO dead (uid, name, t) VALUES (?, ?, ?)`, conn.info.uid, conn.info.name, Date.now());
+    for (const c of [...this.conns.values()]) if (c.info.uid === conn.info.uid) {
+      try { c.ws.send(JSON.stringify({ t: 'dead' } satisfies ServerMsg)); } catch { /* */ }
+      this.broadcast({ t: 'died', id: c.info.id, name: c.info.name }, c.ws);
+      this.conns.delete(c.ws);
+      this.dirty.delete(c);
+      try { c.ws.close(4001, 'dead'); } catch { /* */ }
+    }
+  }
+
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === '/ws') return this.accept(JSON.parse(url.searchParams.get('u')!));
+    if (url.pathname === '/admin/revive') {
+      const uid = url.searchParams.get('uid') || '';
+      this.sql.exec(`DELETE FROM dead WHERE uid = ?`, uid);
+      return json({ ok: true, uid });
+    }
     if (url.pathname === '/login/start') {
       const now = Date.now();
       this.sql.exec(`DELETE FROM logins WHERE created < ?`, now - 15 * 60 * 1000);
@@ -308,9 +362,14 @@ export class World extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server);
+    if (this.isDead(user.uid)) {
+      server.send(JSON.stringify({ t: 'dead' } satisfies ServerMsg));
+      server.close(4001, 'dead');
+      return new Response(null, { status: 101, webSocket: client });
+    }
     const custom = [...this.sql.exec<{ name: string }>(`SELECT name FROM users WHERE uid = ?`, user.uid)][0];
     const info: PlayerInfo = { id: crypto.randomUUID().slice(0, 8), uid: user.uid, name: custom?.name || user.name, photo: user.photo };
-    const conn: Conn = { ws: server, info, s: null, lastPersist: 0, bucket: 40, bucketT: Date.now(), doorT: 0 };
+    const conn: Conn = { ws: server, info, s: null, lastPersist: 0, bucket: 40, bucketT: Date.now(), doorT: 0, mineT: 0 };
     server.serializeAttachment({ info, s: null } satisfies Attach);
     const others = [...this.conns.values()];
     this.conns.set(server, conn);
@@ -323,6 +382,7 @@ export class World extends DurableObject<Env> {
       doors: Object.fromEntries(this.getDoors()),
       panels: Object.fromEntries(counts),
       strokes: this.totalStrokes,
+      broken: [...this.getBroken()],
     };
     server.send(JSON.stringify(welcome));
     this.broadcast({ t: 'join', p: info }, server);
@@ -361,6 +421,7 @@ export class World extends DurableObject<Env> {
         if (!Array.isArray(s) || s.length !== 6 || !s.every((n) => typeof n === 'number' && isFinite(n))) return;
         const r = (n: number, k = 100) => Math.round(n * k) / k;
         conn.s = [r(s[0]), r(s[1]), r(s[2]), r(s[3]), r(s[4]), s[5] & 7];
+        if (s[1] < DEATH_Y) { this.kill(conn); return; } // fell off the island: forever
         this.dirty.add(conn);
         this.scheduleFlush();
         if (now - conn.lastPersist > 3000) {
@@ -405,6 +466,24 @@ export class World extends DurableObject<Env> {
         doors.set(msg.id, open);
         this.sql.exec(`INSERT OR REPLACE INTO doors (id, open) VALUES (?, ?)`, msg.id, open ? 1 : 0);
         this.broadcast({ t: 'door', id: msg.id, open });
+        break;
+      }
+      case 'mine': {
+        if (typeof msg.k !== 'string' || !conn.s) return;
+        const { L, x, z, s: seg } = parseKey(msg.k);
+        if (![L, x, z, seg].every(Number.isInteger)) return;
+        const hard = hardness(L, x, z, seg);
+        if (!hard || now - conn.mineT < hard * 700) return;
+        const b = this.getBroken();
+        if (b.has(msg.k)) return;
+        const cy = L * FLOOR_H + (seg < 0 ? -0.25 : (seg + 0.5) * SEG_H);
+        if (Math.hypot(conn.s[0] - (x + 0.5), conn.s[1] + 1.5 - cy, conn.s[2] - (z + 0.5)) > 7) return;
+        conn.mineT = now;
+        const until = now + REGROW_MS;
+        b.set(msg.k, until);
+        this.sql.exec(`INSERT OR REPLACE INTO broken (k, until, uid) VALUES (?, ?, ?)`, msg.k, until, conn.info.uid);
+        this.broadcast({ t: 'broken', k: msg.k, by: conn.info.id, until });
+        this.scheduleHeal();
         break;
       }
       case 'rename': {

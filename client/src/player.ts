@@ -1,4 +1,4 @@
-import { CENTER, WORLD_R, boxesIn, spawnPoint, type Box } from '../../shared/world';
+import { DEATH_Y, SIZE, boxesIn, spawnPoint, type Box, type WorldState } from '../../shared/world';
 
 export const HALF_W = 0.3;
 export const STAND_H = 1.8;
@@ -15,7 +15,11 @@ export interface InputState {
   right: number; // -1..1
   jump: boolean;
   crouch: boolean;
+  sprint: boolean;
 }
+
+const WALK = 5.2, SPRINT = 10.5, SNEAK = 2.4, CLIMB = 3.6;
+const outsideFootprint = (x: number, z: number) => x < 0 || z < 0 || x > SIZE || z > SIZE;
 
 export class Player {
   x = 0; y = 0; z = 0;
@@ -28,10 +32,14 @@ export class Player {
   moving = false;
   bounced = 0; // timestamp of last bounce, for sfx
   landed = 0;
-  doorOpen: (id: string) => boolean;
+  sprinting = false;
+  climbing = false; // pressed against a climbable surface (facade tendons from outside, mushroom stems)
+  climbMoved = 0; // metres climbed, for the sinew creak
+  dead = false;
+  ws: WorldState;
 
-  constructor(doorOpen: (id: string) => boolean, seed: number) {
-    this.doorOpen = doorOpen;
+  constructor(ws: WorldState, seed: number) {
+    this.ws = ws;
     this.respawn(seed);
   }
 
@@ -39,6 +47,7 @@ export class Player {
     const s = spawnPoint(seed);
     this.x = s.x; this.y = s.y; this.z = s.z;
     this.vx = this.vy = this.vz = 0;
+    this.dead = false;
     this.yaw = Math.random() * Math.PI * 2;
     this.eyeSmoothY = this.y + EYE_STAND;
   }
@@ -46,17 +55,33 @@ export class Player {
   get height() { return this.crouching ? CROUCH_H : STAND_H; }
 
   private overlaps(x: number, y: number, z: number, h: number, ignore?: Set<string>): Box[] {
-    const bs = boxesIn(x - HALF_W, y, z - HALF_W, x + HALF_W, y + h, z + HALF_W, this.doorOpen);
+    const bs = boxesIn(x - HALF_W, y, z - HALF_W, x + HALF_W, y + h, z + HALF_W, this.ws);
     const eps = 1e-4;
     return bs.filter((b) => !(ignore && ignore.has(bkey(b))) && b.x1 > x - HALF_W + eps && b.x0 < x + HALF_W - eps && b.y1 > y + eps && b.y0 < y + h - eps && b.z1 > z - HALF_W + eps && b.z0 < z + HALF_W - eps);
   }
 
+  /** a climbable box right in front of us (in the direction we push), or null */
+  private climbable(wx: number, wz: number): Box | null {
+    const l = Math.hypot(wx, wz);
+    if (l < 0.1) return null;
+    const px = this.x + (wx / l) * 0.12, pz = this.z + (wz / l) * 0.12;
+    const out = outsideFootprint(this.x, this.z);
+    const bs = boxesIn(px - HALF_W, this.y + 0.1, pz - HALF_W, px + HALF_W, this.y + this.height - 0.2, pz + HALF_W, this.ws);
+    for (const b of bs) {
+      if (b.climb === 'stem') return b;
+      if (b.climb === 'facade' && out) return b;
+    }
+    return null;
+  }
+
   update(dt: number, inp: InputState) {
+    if (this.dead) return;
     // crouch (check head room when standing up)
     if (inp.crouch) this.crouching = true;
     else if (this.crouching && this.overlaps(this.x, this.y, this.z, STAND_H).length === 0) this.crouching = false;
 
-    const speed = this.crouching ? 2.4 : 5.2;
+    this.sprinting = inp.sprint && !this.crouching && inp.fwd > 0.3;
+    const speed = this.crouching ? SNEAK : this.sprinting ? SPRINT : WALK;
     let wf = inp.fwd, wr = inp.right;
     const len = Math.hypot(wf, wr);
     if (len > 1) { wf /= len; wr /= len; }
@@ -64,17 +89,35 @@ export class Player {
     // forward = (-sin, -cos) in xz (three.js camera looks down -z at yaw 0)
     const wx = (-sin * wf + cos * wr) * speed;
     const wz = (-cos * wf - sin * wr) * speed;
-    const accel = this.onGround ? 14 : 3;
+    // climbing: hold forward against tendons/stems to go up; let go and you slowly slide
+    const grip = inp.fwd > 0.3 ? this.climbable(wx, wz) : null;
+    const wasClimbing = this.climbing;
+    this.climbing = !!grip;
+    const accel = this.onGround || this.climbing ? 14 : 3;
     const k = 1 - Math.exp(-accel * dt);
     this.vx += (wx - this.vx) * k;
     this.vz += (wz - this.vz) * k;
     this.moving = Math.hypot(this.vx, this.vz) > 0.6;
 
-    if (inp.jump && this.onGround) {
+    if (this.climbing) {
+      if (inp.jump && !this.onGround) { // push off the wall
+        const l = Math.hypot(wx, wz) || 1;
+        this.vx = -(wx / l) * 5; this.vz = -(wz / l) * 5; this.vy = 6;
+        this.climbing = false;
+      } else {
+        this.vy = CLIMB * (this.crouching ? 0.5 : 1);
+        this.climbMoved += this.vy * dt;
+        this.onGround = false;
+      }
+    } else if (wasClimbing && this.vy > 0 && inp.fwd > 0.3) {
+      // reached the top edge: a small hop over the lip
+      this.vy = 4.2;
+    }
+    if (inp.jump && this.onGround && !this.climbing) {
       this.vy = JUMP_V;
       this.onGround = false;
     }
-    this.vy -= GRAVITY * dt;
+    if (!this.climbing) this.vy -= GRAVITY * dt;
     if (this.vy < -40) this.vy = -40;
 
     // boxes we are already stuck in (e.g. a door closed on us) are ignored
@@ -100,11 +143,8 @@ export class Player {
       }
     }
 
-    // keep inside the world
-    const dx = this.x - CENTER, dz = this.z - CENTER;
-    const d = Math.hypot(dx, dz);
-    if (d > WORLD_R) { this.x = CENTER + (dx / d) * WORLD_R; this.z = CENTER + (dz / d) * WORLD_R; }
-    if (this.y < -30) this.respawn();
+    // no invisible walls: past the island edge there is only the void
+    if (this.y < DEATH_Y) { this.dead = true; return; }
 
     // smooth eye (steps / crouch)
     const targetEye = this.crouching ? EYE_CROUCH : EYE_STAND;

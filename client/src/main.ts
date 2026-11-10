@@ -3,9 +3,11 @@ import './style.css';
 import qrcode from 'qrcode-generator';
 import { Mirrors } from './mirrors';
 import { Sfx, surfaceAt } from './sfx';
-import { DOORS, ROOMS, insideMirror, levelOfY, raycastPanels, raycastSolid, roomAt } from '../../shared/world';
+import { CENTER, DOORS, FLOOR_H, ROOMS, SEG_H, SLAB, hardness, insideMirror, islandEdge, levelOfY, parseKey, raycastBlock, raycastPanels, raycastSolid, roomAt, type WorldState } from '../../shared/world';
 import { F_CROUCH, F_DRAWING, F_MOVING, MAX_SIZE, MIN_SIZE, MAX_STROKE_NUMS, type PlayerInfo, type ServerMsg, type StrokeData } from '../../shared/protocol';
-import { buildSky, buildWorld, updateDoors } from './world3d';
+import { buildCilia, buildVoid, buildWorld, updateDoors } from './world3d';
+import { Sky } from './sky';
+import { LIFE, MAX_PEOPLE, heartbeat } from './living';
 import { Player, type InputState } from './player';
 import { PaintLayer } from './paint';
 import { Avatar, avatarUrl } from './avatars';
@@ -173,18 +175,22 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 $('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const FOG = new THREE.Color('#6a4a86');
-scene.fog = new THREE.Fog(FOG, 30, 140);
-const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.05, 600);
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.05, 900);
 camera.rotation.order = 'YXZ';
-scene.add(new THREE.HemisphereLight(0xe4ddf0, 0xa69a8e, 1.5) /* sky: dusk; ground: bounce light, slightly warm from oak floors but mostly neutral (concrete, plaster) */);
-const sun = new THREE.DirectionalLight(0xffe2c8, 1.1);
-sun.position.set(30, 60, 10);
-scene.add(sun);
+// the organism dreams the real sky over Minsk: moon night or dawn, synced by the clock for everyone
+const sky = new Sky(scene);
 
-const world = buildWorld(scene);
-const sky = buildSky(scene);
+// shared world state: doors (server) + wounds made with the pickaxe (server, heal after 15 min)
+const doorOpen = new Map<string, boolean>(DOORS.map((d) => [d.id, true]));
+const isDoorOpen = (id: string) => doorOpen.get(id) ?? true;
+const broken = new Set<string>();
+const ws: WorldState = { doorOpen: isDoorOpen, broken: (k) => broken.has(k) };
+
+const world = buildWorld(scene, ws);
+const cilia = buildCilia(scene, IS_TOUCH);
+buildVoid(scene);
 const paint = new PaintLayer(scene);
+paint.isBroken = ws.broken;
 const music = new Music();
 const sfx = new Sfx();
 // audio may only start from a user gesture
@@ -201,9 +207,8 @@ addEventListener('resize', () => {
 });
 
 // ------------------------------------------------------------------ state
-const doorOpen = new Map<string, boolean>(DOORS.map((d) => [d.id, true]));
-const isDoorOpen = (id: string) => doorOpen.get(id) ?? true;
-const player = new Player(isDoorOpen, Math.floor(Math.random() * 100));
+const player = new Player(ws, Math.floor(Math.random() * 100));
+let dead = false;
 const avatars = new Map<string, Avatar>();
 let me: PlayerInfo | null = null;
 const panelCounts: Record<string, number> = {};
@@ -211,14 +216,16 @@ let net: Net | null = null;
 
 // tools
 const PALETTE = [0x1a1c2c, 0x5d275d, 0xb13e53, 0xef7d57, 0xffcd75, 0xa7f070, 0x38b764, 0x257179, 0x29366f, 0x3b5dc9, 0x41a6f6, 0x73eff7, 0xf4f4f4, 0x94b0c2, 0x566c86, 0xff77a8, 0xd64646];
-const TOOL_NAMES = ['кисть', 'маркер', 'спрей', 'пиксель', 'споры'];
-let tool = Number(store.get('tool') ?? 0);
+// one brush to leave a mark, one pickaxe to wound the tissue (it heals in 15 minutes)
+const TOOL_NAMES = ['кисть', 'кирка'];
+const BRUSH = 0, PICK = 1;
+let tool = Math.min(1, Number(store.get('tool') ?? 0));
 let color = Number(store.get('color') ?? 0xff77a8);
 let size = Number(store.get('size2') ?? 24);
 
 // ------------------------------------------------------------------ input
 const keys = new Set<string>();
-const inp: InputState = { fwd: 0, right: 0, jump: false, crouch: false };
+const inp: InputState = { fwd: 0, right: 0, jump: false, crouch: false, sprint: false };
 let locked = false;
 let mouseDown = false;
 let touchDraw = false; // draw-mode toggle on touch
@@ -246,12 +253,14 @@ addEventListener('wheel', (e) => { if (locked) setSize(e.deltaY < 0 ? size * 1.1
 addEventListener('keydown', (e) => {
   if ((e.target as HTMLElement).tagName === 'INPUT') return;
   keys.add(e.code);
+  // Ctrl is crouch: keep the browser from treating Ctrl+W/S/D as shortcuts while playing
+  if (locked && (e.ctrlKey || e.metaKey) && e.code !== 'KeyR') e.preventDefault();
   if (e.code === 'Tab') { e.preventDefault(); if (locked) document.exitPointerLock(); }
   if (e.code === 'KeyE') toggleNearestDoor();
   if (e.code === 'KeyM') toggleMusic();
   if (e.code === 'KeyN') toggleSfx();
   if (e.code === 'KeyH') { if (locked) document.exitPointerLock(); }
-  if (e.code >= 'Digit1' && e.code <= 'Digit5') setTool(Number(e.code.slice(5)) - 1);
+  if (e.code === 'Digit1' || e.code === 'Digit2') setTool(Number(e.code.slice(5)) - 1);
   if (e.code === 'BracketRight') setSize(size + 2);
   if (e.code === 'BracketLeft') setSize(size - 2);
   if (e.code === 'KeyQ' || e.code === 'KeyR') {
@@ -260,6 +269,8 @@ addEventListener('keydown', (e) => {
   }
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
+// Ctrl+W closes the tab before JS can stop it: ask first while you are inside
+addEventListener('beforeunload', (e) => { if (started && locked && !dead) { e.preventDefault(); e.returnValue = ''; } });
 addEventListener('blur', () => { keys.clear(); mouseDown = false; });
 
 // ---- touch controls
@@ -327,12 +338,16 @@ if (IS_TOUCH) {
   hold('t-jump', (v) => { touchJump = v; });
   hold('t-crouch', (v) => { if (v) { crouchToggle = !crouchToggle; $('t-crouch').classList.toggle('on', crouchToggle); } });
   hold('t-door', (v) => { if (v) toggleNearestDoor(); });
-  hold('t-draw', (v) => {
-    if (!v) return;
-    touchDraw = !touchDraw;
-    $('t-draw').classList.toggle('on', touchDraw);
+  const touchTool = (t: number) => {
+    const on = !(touchDraw && tool === t);
+    setTool(t);
+    touchDraw = on;
+    $('t-draw').classList.toggle('on', on && t === BRUSH);
+    $('t-pick').classList.toggle('on', on && t === PICK);
     flushChunk(true);
-  });
+  };
+  hold('t-draw', (v) => { if (v) touchTool(BRUSH); });
+  hold('t-pick', (v) => { if (v) touchTool(PICK); });
 }
 
 function readInput() {
@@ -340,9 +355,10 @@ function readInput() {
   inp.fwd = (k('KeyW') || k('ArrowUp') ? 1 : 0) - (k('KeyS') || k('ArrowDown') ? 1 : 0);
   inp.right = (k('KeyD') || k('ArrowRight') ? 1 : 0) - (k('KeyA') || k('ArrowLeft') ? 1 : 0);
   inp.jump = k('Space') || touchJump;
-  inp.crouch = k('ShiftLeft') || k('ShiftRight') || k('KeyC') || k('ControlLeft') || crouchToggle;
-  if (stick.id !== -1) { inp.fwd = -stick.y; inp.right = stick.x; }
-  if (!locked && !IS_TOUCH) { inp.fwd = inp.right = 0; inp.jump = false; }
+  inp.crouch = k('ControlLeft') || k('ControlRight') || k('KeyC') || crouchToggle;
+  inp.sprint = k('ShiftLeft') || k('ShiftRight');
+  if (stick.id !== -1) { inp.fwd = -stick.y; inp.right = stick.x; inp.sprint = Math.hypot(stick.x, stick.y) > 0.97; }
+  if (!locked && !IS_TOUCH) { inp.fwd = inp.right = 0; inp.jump = false; inp.sprint = false; }
 }
 
 // ------------------------------------------------------------------ toolbar UI
@@ -352,11 +368,8 @@ function toolIcon(t: number) {
   const x = c.getContext('2d')!;
   x.fillStyle = '#fff';
   const P = (a: number, b: number, w = 1, h = 1) => x.fillRect(a, b, w, h);
-  if (t === 0) { P(7, 1, 3, 3); P(5, 3, 3, 3); P(3, 5, 3, 3); x.fillStyle = '#ffd88a'; P(1, 8, 2, 2); }
-  if (t === 1) { P(6, 1, 4, 4); P(4, 3, 4, 4); P(2, 5, 4, 3); x.fillStyle = '#ffd88a'; P(1, 8, 4, 2); }
-  if (t === 2) { P(4, 4, 4, 6); P(5, 2, 2, 2); x.fillStyle = '#ffd88a'; P(1, 1); P(2, 3); P(0, 4); P(3, 0); }
-  if (t === 3) { P(1, 1, 4, 4); P(6, 6, 4, 4); x.fillStyle = '#ffd88a'; P(6, 1, 4, 4); P(1, 6, 4, 4); }
-  if (t === 4) { x.fillStyle = '#ffd88a'; P(4, 4, 3, 3); x.fillStyle = '#fff'; P(1, 2); P(8, 1); P(9, 8); P(2, 9); P(5, 0); P(0, 6); P(10, 5); }
+  if (t === 0) { P(7, 1, 3, 3); P(5, 3, 3, 3); P(3, 5, 3, 3); x.fillStyle = '#ff6fae'; P(1, 8, 2, 2); }
+  if (t === 1) { x.fillStyle = '#e8dcc4'; P(2, 1, 7, 2); P(1, 2, 2, 2); P(8, 2, 2, 2); x.fillStyle = '#c9a27a'; P(5, 3, 1, 8); }
   return c;
 }
 function buildToolbar() {
@@ -399,8 +412,10 @@ function buildToolbar() {
   }
 }
 function setTool(t: number) {
-  tool = Math.max(0, Math.min(4, t)); store.set('tool', String(tool));
+  tool = Math.max(0, Math.min(1, t)); store.set('tool', String(tool));
   document.querySelectorAll('.tool').forEach((el, i) => el.classList.toggle('on', i === tool));
+  $('toolbar').classList.toggle('pick', tool === PICK);
+  mining = null;
   flushChunk(true);
 }
 function setColor(c: number) {
@@ -523,7 +538,7 @@ function toggleNearestDoor() {
 function applyDoor(id: string, open: boolean) {
   doorOpen.set(id, open);
   const v = world.doors.get(id);
-  if (v) v.target = open ? Math.PI / 2 : 0;
+  if (v) v.target = open ? 1 : 0;
 }
 
 // ------------------------------------------------------------------ drawing
@@ -540,8 +555,9 @@ function aimRay(screen: { x: number; y: number } | null) {
   const o = camera.position;
   const hit = raycastPanels(o.x, o.y, o.z, tmpDir.x, tmpDir.y, tmpDir.z, REACH);
   if (!hit) return null;
-  const solid = raycastSolid(o.x, o.y, o.z, tmpDir.x, tmpDir.y, tmpDir.z, hit.t + 0.1, isDoorOpen);
+  const solid = raycastSolid(o.x, o.y, o.z, tmpDir.x, tmpDir.y, tmpDir.z, hit.t + 0.1, ws);
   if (solid < hit.t - 0.08) return null;
+  if (solid > hit.t + 0.08) return null; // the tissue behind this spot is torn out
   if (insideMirror(hit.panel.id, hit.u, hit.v)) return null; // glass is not a canvas
   return hit;
 }
@@ -552,10 +568,10 @@ function flushChunk(end = false) {
   if (c.cont && c.pts.length === 2) { chunk = null; return; }
   if (c.pts.length === 2) {
     // single dot
-    paint.segment(c.panel, tool, color, size, c.seed, 0, c.pts[0], c.pts[1], c.pts[0], c.pts[1]);
+    paint.segment(c.panel, BRUSH, color, size, c.seed, 0, c.pts[0], c.pts[1], c.pts[0], c.pts[1]);
   }
   if (c.pts.length >= 2) {
-    const d: StrokeData = [tool, color, size, c.seed, c.pts];
+    const d: StrokeData = [BRUSH, color, size, c.seed, c.pts];
     net?.send({ t: 's', p: c.panel, d });
     panelCounts[c.panel] = (panelCounts[c.panel] || 0) + 1;
   }
@@ -568,7 +584,7 @@ function flushChunk(end = false) {
 }
 
 function updateDrawing() {
-  const active = IS_TOUCH ? touchDraw : locked;
+  const active = (IS_TOUCH ? touchDraw : locked) && tool === BRUSH;
   const wantDraw = IS_TOUCH ? touchDraw && touchDrawPoint !== null : locked && mouseDown;
   const hit = active ? aimRay(IS_TOUCH ? touchDrawPoint : null) : null;
   // preview ring
@@ -593,14 +609,122 @@ function updateDrawing() {
   const lu = chunk.pts[n - 2], lv = chunk.pts[n - 1];
   const dist = Math.hypot(u - lu, v - lv);
   const minStep = Math.max(1.5, size * 0.18);
-  const sprayHold = (tool === 2 || tool === 4) && now - chunk.lastAdd > 70;
-  if (dist >= minStep || sprayHold) {
+  if (dist >= minStep) {
     chunk.pts.push(u, v);
     chunk.lastAdd = now;
     const i = chunk.pts.length / 2 - 2;
-    paint.segment(chunk.panel, tool, color, size, chunk.seed, i, lu, lv, u, v);
+    paint.segment(chunk.panel, BRUSH, color, size, chunk.seed, i, lu, lv, u, v);
   }
   if (chunk.pts.length >= MAX_STROKE_NUMS - 2 || (now - chunk.t0 > 120 && chunk.pts.length >= 4)) flushChunk(false);
+}
+
+// ------------------------------------------------------------------ pickaxe
+// Hold to wound the tissue: wall segments (0.9 m) and floor plates. Takes `hardness` seconds,
+// the server checks reach + speed, everyone sees the wound, the organism heals it in 15 minutes.
+let mining: { key: string; t: number; need: number; L: number; x: number; z: number; s: number; lastHit: number } | null = null;
+const hl = new THREE.Mesh(new THREE.BoxGeometry(1.02, 1, 1.02), new THREE.MeshBasicMaterial({ color: 0xff6fae, wireframe: true, transparent: true, opacity: 0.7, depthTest: false, fog: false }));
+hl.renderOrder = 11; hl.visible = false; scene.add(hl);
+
+function blockBox(L: number, x: number, z: number, s: number) {
+  const base = L * FLOOR_H;
+  return s < 0 ? { y0: base - SLAB, y1: base } : { y0: base + s * SEG_H, y1: base + (s + 1) * SEG_H };
+}
+function updateMining(dt: number) {
+  const active = (IS_TOUCH ? touchDraw : locked) && tool === PICK && !dead;
+  const want = IS_TOUCH ? touchDraw && touchDrawPoint !== null : locked && mouseDown;
+  let target: ReturnType<typeof raycastBlock> = null;
+  if (active) {
+    const sp = IS_TOUCH ? touchDrawPoint : null;
+    if (sp) {
+      raycaster.setFromCamera(new THREE.Vector2((sp.x / innerWidth) * 2 - 1, -(sp.y / innerHeight) * 2 + 1), camera);
+      tmpDir.copy(raycaster.ray.direction);
+    } else camera.getWorldDirection(tmpDir);
+    const o = camera.position;
+    target = raycastBlock(o.x, o.y, o.z, tmpDir.x, tmpDir.y, tmpDir.z, 5.5, ws);
+  }
+  if (target) {
+    const b = blockBox(target.L, target.x, target.z, target.s);
+    hl.visible = true;
+    hl.position.set(target.x + 0.5, (b.y0 + b.y1) / 2, target.z + 0.5);
+    hl.scale.set(1, (b.y1 - b.y0) + 0.02, 1);
+  } else hl.visible = false;
+  if (!want || !target) { mining = null; $('mine-bar').classList.add('hidden'); held.swing = 0; return; }
+  if (!mining || mining.key !== target.key) mining = { key: target.key, t: 0, need: hardness(target.L, target.x, target.z, target.s), L: target.L, x: target.x, z: target.z, s: target.s, lastHit: 0 };
+  mining.t += dt;
+  held.swing += dt;
+  const now = performance.now();
+  if (now - mining.lastHit > 280) {
+    mining.lastHit = now;
+    sfx.pick(target.s < 0 ? floorSurface(target.L, target.x, target.z) : 'membrane');
+  }
+  $('mine-bar').classList.remove('hidden');
+  ($('mine-bar').firstElementChild as HTMLElement).style.width = Math.min(100, (mining.t / mining.need) * 100) + '%';
+  if (mining.t >= mining.need) {
+    net?.send({ t: 'mine', k: mining.key });
+    applyBroken(mining.key, true); // optimistic; the server confirms or heals it back
+    sfx.tear();
+    mining = null;
+    $('mine-bar').classList.add('hidden');
+  }
+}
+function floorSurface(L: number, x: number, z: number) {
+  return surfaceAt(x + 0.5, L * FLOOR_H, z + 0.5);
+}
+function applyBroken(key: string, isBroken: boolean) {
+  if (isBroken === broken.has(key)) return;
+  if (isBroken) broken.add(key); else broken.delete(key);
+  const { L, s } = parseKey(key);
+  world.rebuildLevel(L);
+  if (s < 0 && L > 0) world.rebuildLevel(L - 1);
+  paint.refreshMasks(L);
+}
+
+// held item: a bone pickaxe or the brush, low in the right corner, swings while working
+const held = { group: new THREE.Group(), pick: new THREE.Group(), brush: new THREE.Group(), swing: 0 };
+{
+  const bone = new THREE.MeshLambertMaterial({ color: 0xe8dcc4, emissive: 0x2a2018 });
+  const sinew = new THREE.MeshLambertMaterial({ color: 0xa0405a, emissive: 0x30101a });
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.5, 0.05), sinew); handle.position.y = -0.1;
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.07, 0.07), bone); head.position.y = 0.14;
+  const tip1 = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.05, 0.05), bone); tip1.position.set(0.24, 0.11, 0);
+  const tip2 = tip1.clone(); tip2.position.x = -0.24;
+  held.pick.add(handle, head, tip1, tip2);
+  const stick = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.42, 0.04), bone); stick.position.y = -0.05;
+  const tuft = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.1, 0.07), new THREE.MeshBasicMaterial({ color })); tuft.position.y = 0.2;
+  tuft.name = 'tuft';
+  held.brush.add(stick, tuft);
+  held.group.add(held.pick, held.brush);
+  held.group.position.set(0.3, -0.28, -0.6);
+  held.group.rotation.set(0.2, -0.3, 0.25);
+  held.group.scale.setScalar(0.55);
+  held.group.traverse((o) => { o.renderOrder = 12; const m = (o as THREE.Mesh).material as THREE.MeshLambertMaterial | undefined; if (m) { m.depthTest = false; m.fog = false; } });
+  camera.add(held.group);
+  scene.add(camera);
+}
+function updateHeld(now: number) {
+  held.group.visible = started && !dead && !(IS_TOUCH && !touchDraw);
+  held.pick.visible = tool === PICK;
+  held.brush.visible = tool === BRUSH;
+  ((held.brush.getObjectByName('tuft') as THREE.Mesh).material as THREE.MeshBasicMaterial).color.setHex(color);
+  const bob = player.moving && player.onGround ? Math.sin(now / (player.sprinting ? 70 : 110)) * 0.015 : 0;
+  const sw = held.swing > 0 ? Math.sin(held.swing * 22) * 0.6 : (chunk ? Math.sin(now / 90) * 0.06 : 0);
+  held.group.position.y = -0.28 + bob;
+  held.group.rotation.x = 0.2 - Math.max(0, sw);
+}
+
+// ------------------------------------------------------------------ death
+function die(fromServer: boolean) {
+  if (dead) return;
+  dead = true;
+  player.dead = true;
+  document.body.classList.add('dead');
+  if (!fromServer) net?.send({ t: 'p', s: [player.x, player.y, player.z, player.yaw, player.pitch, 0] }); // the server sees you below the island
+  setTimeout(() => net?.close(), 1500);
+  if (document.pointerLockElement) document.exitPointerLock();
+  $('pause').classList.add('hidden');
+  $('death').classList.remove('hidden');
+  sfx.fall();
+  music.stop();
 }
 
 // ------------------------------------------------------------------ network
@@ -620,6 +744,14 @@ function onMsg(m: ServerMsg) {
       for (const p of m.players) addAvatar(p);
       for (const s of m.states) avatars.get(s[0])?.push(s);
       for (const [id, open] of Object.entries(m.doors)) applyDoor(id, open);
+      {
+        const keys = new Set(m.broken.map(([k]) => k));
+        const levels = new Set<number>();
+        for (const k of [...broken, ...keys]) if (broken.has(k) !== keys.has(k)) { const { L, s } = parseKey(k); levels.add(L); if (s < 0 && L > 0) levels.add(L - 1); }
+        broken.clear();
+        for (const k of keys) broken.add(k);
+        for (const L of levels) { world.rebuildLevel(L); paint.refreshMasks(L); }
+      }
       Object.assign(panelCounts, m.panels);
       paint.loadAll(API, m.panels, { x: player.x, y: player.y, z: player.z });
       renderPlayers();
@@ -655,6 +787,30 @@ function onMsg(m: ServerMsg) {
     case 'door':
       applyDoor(m.id, m.open);
       break;
+    case 'broken':
+      applyBroken(m.k, true);
+      if (m.by !== me?.id) {
+        const { L, x, z, s } = parseKey(m.k);
+        const d = Math.hypot(x + 0.5 - player.x, L * FLOOR_H + Math.max(0, s) * SEG_H - player.y, z + 0.5 - player.z);
+        if (d < 18) sfx.tear(Math.pow(1 - d / 18, 2));
+      }
+      break;
+    case 'heal': {
+      let near = false;
+      for (const k of m.k) {
+        applyBroken(k, false);
+        const { L, x, z } = parseKey(k);
+        if (Math.hypot(x - player.x, L * FLOOR_H - player.y, z - player.z) < 14) near = true;
+      }
+      if (near) sfx.heal();
+      break;
+    }
+    case 'dead':
+      die(true);
+      break;
+    case 'died':
+      if (m.id !== me?.id) feed(`☠ ${m.name} — бездна забрала навсегда`);
+      break;
     case 'rename': {
       if (m.id === me?.id) { me.name = m.name; selfAvatar?.rename(m.name); }
       else avatars.get(m.id)?.rename(m.name);
@@ -674,7 +830,7 @@ let lastSend = 0;
 let lastSent = '';
 function sendState(now: number) {
   if (!net || now - lastSend < 125) return;
-  const flags = (player.crouching ? F_CROUCH : 0) | (player.moving ? F_MOVING : 0) | (chunk ? F_DRAWING : 0);
+  const flags = (player.crouching ? F_CROUCH : 0) | (player.moving ? F_MOVING : 0) | (chunk || mining ? F_DRAWING : 0);
   const s: [number, number, number, number, number, number] = [player.x, player.y, player.z, player.yaw, player.pitch, flags];
   const key = s.map((n) => n.toFixed(2)).join(',');
   if (key === lastSent && now - lastSend < 4000) return;
@@ -684,15 +840,14 @@ function sendState(now: number) {
 
 // ------------------------------------------------------------------ music field
 let lastField = 0;
-let currentRoom = -2;
+let roomText = '';
 function updateField(now: number) {
   if (now - lastField < 250) return;
   lastField = now;
+  $('sky-label').textContent = sky.label();
   const myRoom = roomAt(player.x, player.y + 0.5, player.z);
-  if (myRoom !== currentRoom) {
-    currentRoom = myRoom;
-    $('room-name').textContent = myRoom < 0 ? 'луг' : ROOMS[myRoom].name;
-  }
+  const roomLabel = myRoom < 0 ? (player.y > 1 ? 'снаружи · на теле' : 'поле ресничек') : ROOMS[myRoom].name;
+  if (roomLabel !== roomText) { roomText = roomLabel; $('room-name').textContent = roomLabel; }
   let prox = 0, movingNear = 0;
   const voices: { tone: number; pan: number; gain: number; moving: boolean; d: number }[] = [];
   const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
@@ -729,7 +884,7 @@ function footsteps(dt: number, px0: number, pz0: number, wasAir: boolean) {
     if (wasAir && airTime > 0.25) sfx.step(surfaceAt(player.x, player.y, player.z), Math.min(1.2, 0.5 + airTime), 0, 1.8); // landing
     airTime = 0;
     stepAcc += Math.hypot(player.x - px0, player.z - pz0);
-    const stride = player.crouching ? 0.55 : 0.75;
+    const stride = player.crouching ? 0.55 : player.sprinting ? 1.35 : 0.75;
     if (stepAcc >= stride) { stepAcc -= stride; sfx.step(surfaceAt(player.x, player.y, player.z), player.crouching ? 0.4 : 0.85); }
   }
   // other players nearby: quiet, positioned
@@ -762,15 +917,32 @@ function frame(now: number) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   if (!me) return; // no world without a confirmed Telegram session
+  const t = now / 1000;
   readInput();
   const px0 = player.x, pz0 = player.z, wasAir = !player.onGround;
+  const climbed0 = player.climbMoved;
   player.update(dt, inp);
+  if (player.dead && !dead) die(false);
+  if (dead) { camera.position.y -= dt * 3; camera.rotation.x = Math.max(-1.5, camera.rotation.x - dt * 0.4); }
   footsteps(dt, px0, pz0, wasAir);
+  if (Math.floor(player.climbMoved / 0.6) !== Math.floor(climbed0 / 0.6)) sfx.climb();
   if (player.bounced !== bouncedSeen) { bouncedSeen = player.bounced; music.event('bounce'); }
-  camera.position.set(player.x, player.eyeSmoothY, player.z);
-  camera.rotation.set(player.pitch, player.yaw, 0);
-  sky.sky.position.copy(camera.position);
-  sky.stars.position.copy(camera.position);
+  if (!dead) {
+    camera.position.set(player.x, player.eyeSmoothY, player.z);
+    camera.rotation.set(player.pitch, player.yaw, 0);
+  }
+  // sprint widens the view a little
+  const fov = player.sprinting && player.moving ? 86 : 75;
+  if (Math.abs(camera.fov - fov) > 0.05) { camera.fov += (fov - camera.fov) * Math.min(1, dt * 8); camera.updateProjectionMatrix(); }
+  sky.update(camera.position, t);
+  updateLife(t);
+  cilia.uniforms.fogColor.value.copy(sky.fog.color);
+  cilia.uniforms.fogNear.value = sky.fog.near;
+  cilia.uniforms.fogFar.value = sky.fog.far;
+  // the island edge: warn before the void
+  const ex = player.x - CENTER, ez = player.z - CENTER;
+  const edge = islandEdge(Math.atan2(ez, ex));
+  $('edge-warn').classList.toggle('hidden', dead || !started || player.y > 2 || Math.hypot(ex, ez) < edge - 3.5);
   updateDoors(world.doors, dt);
   for (const a of avatars.values()) a.update(dt, camera.position);
   if (selfAvatar) {
@@ -780,13 +952,37 @@ function frame(now: number) {
     selfAvatar.root.visible = false;
   }
   mirrors.update(camera.position);
-  if (started) {
+  if (started && !dead) {
     updateDrawing();
+    updateMining(dt);
     sendState(now);
     updateField(now);
   }
+  updateHeld(now);
   paint.flush();
   renderer.render(scene, camera);
+}
+
+// every living surface knows where the nearest people are (and how lively they are)
+let beatI = 0;
+function updateLife(t: number) {
+  const ppl: { x: number; y: number; z: number; w: number; d: number }[] = [];
+  if (!dead) ppl.push({ x: player.x, y: player.y + 0.9, z: player.z, w: player.moving ? 1 : 0.6, d: 0 });
+  for (const a of avatars.values()) {
+    if (!a.hasState) continue;
+    const d = Math.hypot(a.x - player.x, a.y - player.y, a.z - player.z);
+    ppl.push({ x: a.x, y: a.y + 0.9, z: a.z, w: a.flags & (F_MOVING | F_DRAWING) ? 1 : 0.6, d });
+  }
+  ppl.sort((a, b) => a.d - b.d);
+  const arr = LIFE.uPeople.value;
+  for (let i = 0; i < MAX_PEOPLE; i++) {
+    const p = ppl[i];
+    if (p) arr[i].set(p.x, p.y, p.z, p.w); else arr[i].set(0, -999, 0, 0);
+  }
+  LIFE.uTime.value = t;
+  // the heart beats faster the more alive the place is
+  beatI += ((music.enabled ? music.level : 0) * 0.5 + Math.min(1, ppl.length / 6) * 0.5 - beatI) * 0.01;
+  LIFE.uBeat.value = heartbeat(t, 48 + 30 * beatI);
 }
 
 // ------------------------------------------------------------------ boot
@@ -802,6 +998,7 @@ camera.position.set(20, 8, 44);
   net.onStatus = (s) => {
     $('conn').classList.toggle('hidden', s === 'open');
     if (s === 'closed') $('conn').textContent = 'соединение потеряно… переподключаюсь';
+    if (dead) { $('conn').classList.add('hidden'); return; }
     if (s === 'closed' && !me) {
       // session rejected by the server -> back to the Telegram login
       authFails++;
@@ -818,7 +1015,7 @@ camera.position.set(20, 8, 44);
     if (n && n !== me!.name) net.send({ t: 'rename', name: n });
   }
   started = true;
-  if (!IS_TOUCH) $('pause').classList.remove('hidden');
+  if (!IS_TOUCH && !dead) $('pause').classList.remove('hidden');
   // music: remembered choice, but browsers need a gesture to start audio
   if (store.get('music') === '1') {
     const kick = () => { toggleMusic(true); removeEventListener('pointerdown', kick); removeEventListener('keydown', kick); };
@@ -829,8 +1026,10 @@ camera.position.set(20, 8, 44);
 
 // debug / automated testing hook
 (window as unknown as { __ez: unknown }).__ez = {
-  player, camera, avatars, paint, music, doorOpen, sfx,
+  player, camera, avatars, paint, music, doorOpen, sfx, broken, sky, world, ws,
+  applyBroken, die: () => die(false),
+  setTool: (t: number) => setTool(t),
   setLocked: (v: boolean) => setLocked(v),
   setMouse: (v: boolean) => { mouseDown = v; },
-  toggleNearestDoor, setTool, setColor, setSize,
+  toggleNearestDoor, setColor, setSize,
 };

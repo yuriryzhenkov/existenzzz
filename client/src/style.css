@@ -125,3 +125,16 @@ body.touch #pause { display: none !important; }
 
 /* nothing of the world is shown or usable until the server confirmed a Telegram session */
 body:not(.authed) #game, body:not(.authed) #crosshair, body:not(.authed) .hud, body:not(.authed) #touch, body:not(.authed) #pause { display: none !important; }
+
+/* mining progress, edge warning, death */
+#mine-bar { position: fixed; left: 50%; top: calc(50% + 22px); width: 64px; height: 5px; margin-left: -32px; background: rgba(0,0,0,0.5); border-radius: 3px; overflow: hidden; z-index: 6; pointer-events: none; }
+#mine-bar i { display: block; height: 100%; width: 0; background: #ff6fae; box-shadow: 0 0 8px #ff6fae; }
+#edge-warn { position: fixed; left: 50%; top: 22%; transform: translateX(-50%); font: 10px var(--pixel); color: #ff8fb8; letter-spacing: 0.1em; text-shadow: 0 0 10px #ff2f7a; z-index: 6; pointer-events: none; animation: edgepulse 1.2s ease-in-out infinite; }
+@keyframes edgepulse { 50% { opacity: 0.35; } }
+#sky-label { position: fixed; right: 12px; bottom: 10px; font: 8px var(--pixel); color: var(--muted); opacity: 0.7; pointer-events: none; }
+body.touch #sky-label { display: none; }
+#death { background: radial-gradient(circle at 50% 60%, rgba(60, 0, 30, 0.75), rgba(0, 0, 0, 0.96)); z-index: 40; }
+#death .death-card { text-align: center; background: transparent; border: none; box-shadow: none; }
+#death h1 { font: 18px var(--pixel); color: #ff6fae; letter-spacing: 0.08em; text-shadow: 0 0 18px #ff2f7a; margin-bottom: 12px; }
+#death p { font: 12px var(--pixel); color: #e8d8ff; }
+body.dead #game canvas { filter: grayscale(0.7) brightness(0.5); }

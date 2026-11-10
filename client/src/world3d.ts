@@ -1,13 +1,18 @@
 import * as THREE from 'three';
 import {
-  CENTER, DOORS, DOOR_H, DOOR_THICK, FLOOR_H, LEVELS, LEVEL_GRIDS, PAD_H, RAIL_H, SIZE, SLAB, STATIC_BOXES, WALL_H, WIN_HI, WIN_LO,
-  cellAt, isStair, stairH, type Door,
+  CENTER, DOORS, DOOR_H, DOOR_THICK, FLOOR_H, LEVELS, LEVEL_GRIDS, PAD_H, RAIL_H, SEGS, SEG_H, SIZE, SLAB, STATIC_BOXES, WALL_H, WIN_HI, WIN_LO,
+  blockKey, cellAt, isPerimeter, isStair, islandEdge, onIsland, stairH, type Door, type WorldState,
 } from '../../shared/world';
-import { brickTex, capTex, concreteTex, doorTex, gillTex, grassTex, myceliumTex, oakTex, plasterTex, roofTex, screedTex, soilTex, stemTex, woodTex } from './textures';
+import {
+  boneTex, capTex, cartilageTex, feltTex, gillTex, lipTex, membraneTex, mossTex, nacreTex, roeTex, scalesTex, sinewTex, soilTex, stemTex, woundTex,
+} from './textures';
+import { LIFE, living } from './living';
 
-const shadeHex = (c: [number, number, number], k: number) => '#' + c.map((v) => Math.min(255, Math.round(v * k)).toString(16).padStart(2, '0')).join('');
+// Materials follow docs/CONCEPT.md: the same roles as a building (frame, canvas walls, floors per level,
+// stairs, rails, roof, facade) but grown by an organism. Everything answers to people nearby.
 
 type V3 = [number, number, number];
+type B = { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number };
 
 class Mesher {
   pos: number[] = []; nor: number[] = []; uv: number[] = []; col: number[] = []; idx: number[] = [];
@@ -21,15 +26,12 @@ class Mesher {
     ];
     const uvs = [[u0, v0], [u0 + w, v0], [u0 + w, v0 + h], [u0, v0 + h]];
     for (let k = 0; k < 4; k++) {
-      this.pos.push(...pts[k]);
-      this.nor.push(...n);
-      this.uv.push(uvs[k][0], uvs[k][1]);
-      this.col.push(...(k < 2 ? cb : ct));
+      this.pos.push(...pts[k]); this.nor.push(...n); this.uv.push(uvs[k][0], uvs[k][1]); this.col.push(...(k < 2 ? cb : ct));
     }
     this.idx.push(i, i + 1, i + 2, i, i + 2, i + 3);
   }
-  /** faces: string of which faces to emit: x X z Z y Y (lower = negative) */
-  box(b: { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number }, faces: string, tint: V3, ao = 0.8) {
+  /** faces: x X z Z y Y (lower = negative side) */
+  box(b: B, faces: string, tint: V3 = [1, 1, 1], ao = 0.8) {
     const { x0, y0, z0, x1, y1, z1 } = b;
     const bot: V3 = [tint[0] * ao, tint[1] * ao, tint[2] * ao];
     const h = y1 - y0;
@@ -38,7 +40,7 @@ class Mesher {
     if (faces.includes('Z')) this.quad([x0, y0, z1], [1, 0, 0], [0, 1, 0], [0, 0, 1], x0, y0, x1 - x0, h, bot, tint);
     if (faces.includes('z')) this.quad([x1, y0, z0], [-1, 0, 0], [0, 1, 0], [0, 0, -1], -x1, y0, x1 - x0, h, bot, tint);
     if (faces.includes('Y')) this.quad([x0, y1, z1], [1, 0, 0], [0, 0, -1], [0, 1, 0], x0, -z1, x1 - x0, z1 - z0, tint);
-    if (faces.includes('y')) this.quad([x0, y0, z0], [1, 0, 0], [0, 0, 1], [0, -1, 0], x0, z0, x1 - x0, z1 - z0, [tint[0] * 0.7, tint[1] * 0.7, tint[2] * 0.7]);
+    if (faces.includes('y')) this.quad([x0, y0, z0], [1, 0, 0], [0, 0, 1], [0, -1, 0], x0, z0, x1 - x0, z1 - z0, tint);
   }
   build(mat: THREE.Material) {
     const g = new THREE.BufferGeometry();
@@ -54,221 +56,341 @@ class Mesher {
   }
 }
 
-// Materials follow docs/MATERIALS.md: a real concrete/brick/plaster/oak building that mycelium grew through.
 const W: V3 = [1, 1, 1];
 const inAtrium = (x: number, z: number) => x >= 15 && x <= 25 && z >= 15 && z <= 25;
+const lam = (map: THREE.Texture, extra: THREE.MeshLambertMaterialParameters = {}) => new THREE.MeshLambertMaterial({ map, vertexColors: true, ...extra });
 
-// real species: cap colour, spot colour (null = none), stem tint
-const SPECIES: { cap: [number, number, number]; spot: string | null; stem: V3 }[] = [
-  { cap: [196, 46, 38], spot: '#f4efe4', stem: [1, 1, 0.97] }, // fly agaric
-  { cap: [116, 72, 40], spot: null, stem: [0.92, 0.86, 0.74] }, // porcini
-  { cap: [232, 156, 46], spot: null, stem: [1, 0.78, 0.45] }, // chanterelle
-  { cap: [184, 70, 92], spot: null, stem: [1, 0.98, 0.96] }, // russula
-  { cap: [214, 196, 168], spot: '#7a5a3e', stem: [0.95, 0.92, 0.86] }, // parasol (brown scales)
+// real mushroom species keep their colours, but glow from inside (they are part of the organism)
+const SPECIES: { cap: V3; spot: string | null; stem: V3; glow: number }[] = [
+  { cap: [196, 46, 38], spot: '#f4efe4', stem: [1, 1, 0.97], glow: 0xff5a7a }, // fly agaric
+  { cap: [116, 72, 40], spot: null, stem: [0.92, 0.86, 0.74], glow: 0xffb070 }, // porcini
+  { cap: [232, 156, 46], spot: null, stem: [1, 0.78, 0.45], glow: 0xffd060 }, // chanterelle
+  { cap: [184, 70, 92], spot: null, stem: [1, 0.98, 0.96], glow: 0xff70c0 }, // russula
+  { cap: [214, 196, 168], spot: '#7a5a3e', stem: [0.95, 0.92, 0.86], glow: 0xd0f0ff }, // parasol
 ];
+const shadeHex = (c: V3, k: number) => '#' + c.map((v) => Math.min(255, Math.round(v * k)).toString(16).padStart(2, '0')).join('');
 
-export interface DoorView { door: Door; pivot: THREE.Object3D; angle: number; target: number }
+export interface DoorView { door: Door; left: THREE.Object3D; right: THREE.Object3D; open: number; target: number }
 
-export function buildWorld(scene: THREE.Scene) {
-  const lambert = (map: THREE.Texture, extra: THREE.MeshLambertMaterialParameters = {}) => new THREE.MeshLambertMaterial({ map, vertexColors: true, ...extra });
-  const mats = {
-    concrete: lambert(concreteTex()),
-    plaster: lambert(plasterTex()),
-    brick: lambert(brickTex()),
-    screed: lambert(screedTex()),
-    oak: lambert(oakTex()),
-    wood: lambert(woodTex()),
-    soil: lambert(soilTex()),
-    roof: lambert(roofTex()),
-    mycelium: lambert(myceliumTex()),
-    grass: lambert(grassTex(), { polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2 }),
-    stem: lambert(stemTex()),
-    gill: lambert(gillTex()),
-    // bioluminescent mushrooms glow green, like Mycena / Panellus
-    pad: lambert(capTex([150, 230, 150], '#e8ffe0', 53), { emissive: new THREE.Color(0x3fbf5a), emissiveIntensity: 0.55 }),
-    sp0: lambert(capTex(SPECIES[0].cap, SPECIES[0].spot!, 60)),
-    sp1: lambert(capTex(SPECIES[1].cap, shadeHex(SPECIES[1].cap, 0.9), 61)),
-    sp2: lambert(capTex(SPECIES[2].cap, shadeHex(SPECIES[2].cap, 1.06), 62)),
-    sp3: lambert(capTex(SPECIES[3].cap, shadeHex(SPECIES[3].cap, 1.08), 63)),
-    sp4: lambert(capTex(SPECIES[4].cap, SPECIES[4].spot!, 64)),
+export function buildWorld(scene: THREE.Scene, ws: WorldState) {
+  // ---------------- materials ----------------
+  const M = {
+    // frame: bone, faint marrow veins
+    bone: living(lam(boneTex()), { veins: 0.25, veinColor: 0xffc890, veinScale: 1.6, halo: 0.35, haloColor: 0xffe0b0, reach: 3.5, base: 0.05 }),
+    // canvas walls: membrane, strong veins that follow people
+    membrane: living(lam(membraneTex()), { veins: 1, veinColor: 0xff5c9a, veinScale: 1, halo: 0.45, haloColor: 0xffb8d0, reach: 4.5, base: 0.03 }),
+    // facade: dark scales, iridescent, tendons glow when someone is near (climb)
+    scales: living(lam(scalesTex()), { veins: 0.45, veinColor: 0x6af0d0, veinScale: 2.2, halo: 0.45, haloColor: 0x60ffd8, reach: 5, iridescence: 0.6, base: 0.02 }),
+    // ground floor: nacre, rings of light spread from footsteps
+    nacre: living(lam(nacreTex()), { halo: 0.6, haloColor: 0xb8e8ff, reach: 4, ripple: 1, iridescence: 0.25, base: 0.03 }),
+    // upper floors: hyphal felt, warm glow under feet
+    felt: living(lam(feltTex()), { veins: 0.5, veinColor: 0xffb04a, veinScale: 0.8, halo: 0.7, haloColor: 0xffc070, reach: 3, ripple: 0.6, base: 0.05 }),
+    // atrium: living soil, bioluminescent
+    soil: living(lam(soilTex()), { veins: 0.9, veinColor: 0x5cffc8, veinScale: 0.7, halo: 0.8, haloColor: 0x7affd8, reach: 3.5, ripple: 0.8, base: 0.04 }),
+    // roof: roe, eggs light up around people
+    roe: living(lam(roeTex()), { veins: 0.6, veinColor: 0xb48cff, veinScale: 0.5, halo: 0.6, haloColor: 0xc8a8ff, reach: 3, ripple: 0.5, base: 0.05 }),
+    wound: living(lam(woundTex()), { veins: 0.6, veinColor: 0xff3050, veinScale: 0.6, halo: 0.4, haloColor: 0xff8090, reach: 3, base: 0.15 }),
+    cartilage: living(lam(cartilageTex()), { halo: 0.5, haloColor: 0xc0f0ff, reach: 2.5, base: 0.08 }),
+    sinew: living(lam(sinewTex()), { veins: 0.4, veinColor: 0xff7060, halo: 0.3, haloColor: 0xff9080, reach: 2.5, base: 0.06 }),
+    moss: living(lam(mossTex(), { polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2 }), { veins: 0.5, veinColor: 0x50e0c0, veinScale: 1.4, halo: 0.6, haloColor: 0x60ffe0, reach: 3, ripple: 0.6, base: 0.03 }),
+    belly: living(lam(boneTex()), { veins: 1, veinColor: 0xff4070, veinScale: 2.5, base: 0.0 }),
+    stem: living(lam(stemTex()), { veins: 0.5, veinColor: 0xffe0a0, veinScale: 1.2, halo: 0.4, haloColor: 0xfff0d0, reach: 3, base: 0.08 }),
+    gill: living(lam(gillTex()), { veins: 0.4, veinColor: 0xff90c0, base: 0.15 }),
+    pad: living(lam(capTex([120, 230, 150], '#e8ffe0', 53), { emissive: new THREE.Color(0x3fbf5a), emissiveIntensity: 0.6 }), { halo: 0.6, haloColor: 0x80ffa0, reach: 2 }),
+    // the giant fly agaric is the heart: its cap beats
+    heart: living(lam(capTex(SPECIES[0].cap, SPECIES[0].spot!, 60)), { veins: 1, veinColor: 0xff2050, veinScale: 0.9, halo: 0.6, haloColor: 0xff6080, reach: 8, base: 0.12 }),
+    sp0: living(lam(capTex(SPECIES[0].cap, SPECIES[0].spot!, 60)), { veins: 0.6, veinColor: SPECIES[0].glow, base: 0.08 }),
+    sp1: living(lam(capTex(SPECIES[1].cap, shadeHex(SPECIES[1].cap, 0.9), 61)), { veins: 0.6, veinColor: SPECIES[1].glow, base: 0.08 }),
+    sp2: living(lam(capTex(SPECIES[2].cap, shadeHex(SPECIES[2].cap, 1.06), 62)), { veins: 0.6, veinColor: SPECIES[2].glow, base: 0.08 }),
+    sp3: living(lam(capTex(SPECIES[3].cap, shadeHex(SPECIES[3].cap, 1.08), 63)), { veins: 0.6, veinColor: SPECIES[3].glow, base: 0.08 }),
+    sp4: living(lam(capTex(SPECIES[4].cap, SPECIES[4].spot!, 64)), { veins: 0.6, veinColor: SPECIES[4].glow, base: 0.08 }),
   };
-  const M = Object.fromEntries(Object.keys(mats).map((k) => [k, new Mesher()])) as Record<keyof typeof mats, Mesher>;
-  const isWallish = (c: string | null) => c === '#';
+  type K = keyof typeof M;
 
-  /** emit wall-ish faces: faces looking outside the building are brick, inside plaster */
-  const wallFaces = (L: number, x: number, z: number, box: { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number }, faces: string, ao: number) => {
-    for (const f of faces) {
-      const d = f === 'X' ? [1, 0] : f === 'x' ? [-1, 0] : f === 'Z' ? [0, 1] : f === 'z' ? [0, -1] : null;
-      if (!d) { M.concrete.box(box, f, W, ao); continue; } // sills & lintels: precast concrete
-      const outside = cellAt(L, x + d[0], z + d[1]) === null;
-      (outside ? M.brick : M.plaster).box(box, f, W, outside ? 0.85 : ao);
-    }
-  };
-
+  // ---------------- static parts ----------------
+  const S = Object.fromEntries(Object.keys(M).map((k) => [k, new Mesher()])) as Record<K, Mesher>;
   for (let L = 0; L < LEVELS; L++) {
     const base = L * FLOOR_H;
-    const g = LEVEL_GRIDS[L];
-    // ---- slab tops (floor finish) & bottoms (bare concrete ceiling), merged per row & finish ----
-    const finish = (x: number, z: number): Mesher => {
-      if (L === LEVELS - 1) return M.roof;
-      if (L === 0) return inAtrium(x, z) ? M.soil : M.screed;
-      return M.oak;
-    };
-    for (let z = 0; z < SIZE; z++) {
-      let run = -1;
-      let runM: Mesher | null = null;
-      for (let x = 0; x <= SIZE; x++) {
-        const solid = x < SIZE && g[z][x] !== 'o';
-        const m = solid ? finish(x, z) : null;
-        if (run >= 0 && (!solid || m !== runM)) {
-          const box = { x0: run, y0: base - SLAB, z0: z, x1: x, y1: base, z1: z + 1 };
-          runM!.box(box, 'Y', W);
-          if (L > 0) M.concrete.box(box, 'y', [1.3, 1.3, 1.3]); // compensate the darker underside so concrete reads as grey
-          run = -1;
-        }
-        if (solid && run < 0) { run = x; runM = m; }
-      }
-      if (L > 0) for (let x = 0; x < SIZE; x++) {
-        if (g[z][x] === 'o') continue;
-        const b = { x0: x, y0: base - SLAB, z0: z, x1: x + 1, y1: base, z1: z + 1 };
-        // slab edges: at holes they are eaten by mycelium; on the facade it is the concrete slab band
-        for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
-          const n = cellAt(L, x + dx, z + dz);
-          if (n === 'o') M.mycelium.box(b, f, W, 1);
-          else if (n === null) M.concrete.box(b, f, W, 1);
-        }
-      }
-    }
-    // ---- cells ----
     for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
-      const c = g[z][x];
+      const c = LEVEL_GRIDS[L][z][x];
       const nb = (dx: number, dz: number) => cellAt(L, x + dx, z + dz);
-      if (c === '#') {
-        let f = '';
-        if (!isWallish(nb(1, 0))) f += 'X';
-        if (!isWallish(nb(-1, 0))) f += 'x';
-        if (!isWallish(nb(0, 1))) f += 'Z';
-        if (!isWallish(nb(0, -1))) f += 'z';
-        wallFaces(L, x, z, { x0: x, y0: base, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f, 0.8);
-      } else if (c === 'w' || c === 'D') {
-        const sideCull = (n: string | null) => n === '#' || n === 'w' || n === 'D';
-        let f = '';
-        if (!sideCull(nb(1, 0))) f += 'X';
-        if (!sideCull(nb(-1, 0))) f += 'x';
-        if (!sideCull(nb(0, 1))) f += 'Z';
-        if (!sideCull(nb(0, -1))) f += 'z';
-        if (c === 'w') {
-          wallFaces(L, x, z, { x0: x, y0: base, z0: z, x1: x + 1, y1: base + WIN_LO, z1: z + 1 }, f + 'Y', 0.8);
-          wallFaces(L, x, z, { x0: x, y0: base + WIN_HI, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f + 'y', 1);
-        } else {
-          wallFaces(L, x, z, { x0: x, y0: base + DOOR_H, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f + 'y', 1);
+      if (c === 'w' || c === 'D') {
+        const cull = (n: string | null) => n === '#' || n === 'w' || n === 'D';
+        for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
+          if (cull(nb(dx, dz))) continue;
+          const m = nb(dx, dz) === null ? S.scales : S.membrane;
+          if (c === 'w') m.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + WIN_LO, z1: z + 1 }, f);
+          m.box({ x0: x, y0: base + (c === 'w' ? WIN_HI : DOOR_H), z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, f, W, 1);
         }
+        if (c === 'w') S.bone.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + WIN_LO, z1: z + 1 }, 'Y'); // sill
+        S.bone.box({ x0: x, y0: base + (c === 'w' ? WIN_HI : DOOR_H), z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }, 'y'); // lintel
       } else if (c === 'r') {
         let f = '';
         if (nb(1, 0) !== 'r') f += 'X';
         if (nb(-1, 0) !== 'r') f += 'x';
         if (nb(0, 1) !== 'r') f += 'Z';
         if (nb(0, -1) !== 'r') f += 'z';
-        const perimeter = L === LEVELS - 1 && (x === 0 || z === 0 || x === SIZE - 1 || z === SIZE - 1);
-        if (perimeter) {
-          // roof parapet: the brick facade continues above the roof
-          M.brick.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1 }, f + 'Y', W, 0.8);
+        if (L === LEVELS - 1 && isPerimeter(x, z)) {
+          S.scales.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1 }, f + 'Y'); // the outer skin rises into a parapet
         } else {
-          // gallery balustrade: concrete upstand (part of the slab) + oak handrail where hands touch
-          M.concrete.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H - 0.12, z1: z + 1 }, f, W, 0.8);
-          M.wood.box({ x0: x, y0: base + RAIL_H - 0.12, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1 }, f + 'Y', W, 0.95);
+          S.bone.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H - 0.12, z1: z + 1 }, f); // rib
+          S.sinew.box({ x0: x, y0: base + RAIL_H - 0.12, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1 }, f + 'Y', W, 1); // sinew handrail
         }
       } else if (isStair(c)) {
-        // concrete flight, oak treads
+        // the stairs are vertebrae: bone body, cartilage disc on top
         const h = base + stairH(c);
-        M.concrete.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: h - 0.05, z1: z + 1 }, 'XxZz', W, 0.8);
-        M.wood.box({ x0: x, y0: h - 0.05, z0: z, x1: x + 1, y1: h, z1: z + 1 }, 'XxZzY', W, 1);
+        S.bone.box({ x0: x, y0: base, z0: z, x1: x + 1, y1: h - 0.08, z1: z + 1 }, 'XxZz', W, 0.75);
+        S.cartilage.box({ x0: x + 0.04, y0: h - 0.08, z0: z + 0.04, x1: x + 0.96, y1: h, z1: z + 0.96 }, 'XxZzY', W, 1);
       } else if (c === 'b' || c === 'B') {
-        const big = c === 'B';
-        M.stem.box({ x0: x + 0.38, y0: base, z0: z + 0.38, x1: x + 0.62, y1: base + 0.3, z1: z + 0.62 }, 'XxZz', W);
-        M.pad.box({ x0: x + (big ? -0.1 : 0), y0: base + 0.3, z0: z + (big ? -0.1 : 0), x1: x + 1 + (big ? 0.1 : 0), y1: base + PAD_H, z1: z + 1 + (big ? 0.1 : 0) }, 'XxZzYy', W, 0.85);
+        const big = c === 'B', e = big ? 0.1 : 0;
+        S.stem.box({ x0: x + 0.38, y0: base, z0: z + 0.38, x1: x + 0.62, y1: base + 0.3, z1: z + 0.62 }, 'XxZz');
+        S.pad.box({ x0: x - e, y0: base + 0.3, z0: z - e, x1: x + 1 + e, y1: base + PAD_H, z1: z + 1 + e }, 'XxZzYy', W, 0.85);
       }
     }
   }
-
-  // ---- mushrooms: the giant one in the atrium is a fly agaric; meadow ones are real species ----
   for (const b of STATIC_BOXES) {
     const sp = b.species ?? 0;
-    if (b.kind === 'stem') M.stem.box(b, 'XxZz', SPECIES[sp].stem, 0.75);
+    if (b.kind === 'stem') S.stem.box(b, 'XxZz', SPECIES[sp].stem, 0.75);
     else if (b.kind === 'cap') {
-      M[`sp${sp}` as 'sp0'].box(b, 'XxZzY', W, 0.85);
-      M.gill.box(b, 'y', W);
+      (b.species === undefined ? S.heart : S[`sp${sp}` as K]).box(b, 'XxZzY', W, 0.85);
+      S.gill.box(b, 'y');
     }
   }
 
-  // ---- ground (meadow) ----
-  const R = 90;
-  M.grass.quad([CENTER - R, 0, CENTER + R], [1, 0, 0], [0, 0, -1], [0, 1, 0], CENTER - R, -(CENTER + R), R * 2, R * 2, [1, 1, 1]);
-
-  const group = new THREE.Group();
-  for (const k of Object.keys(M) as (keyof typeof mats)[]) {
-    if (M[k].idx.length) group.add(M[k].build(mats[k]));
+  // ---------------- the island: surface outside the building + stalactite belly over the void ----------------
+  const R = 47;
+  const depth = (x: number, z: number) => {
+    const dx = x + 0.5 - CENTER, dz = z + 0.5 - CENTER;
+    const r = Math.hypot(dx, dz) / islandEdge(Math.atan2(dz, dx));
+    const n = Math.sin(x * 0.7) * Math.cos(z * 0.6) * 1.5 + Math.sin((x + z) * 0.31) * 2;
+    return Math.max(1.2, Math.round((Math.pow(Math.max(0, 1 - r), 0.55) * 20 + n + 1) * 2) / 2);
+  };
+  for (let z = Math.floor(CENTER - R); z < CENTER + R; z++) {
+    let run = -1;
+    for (let x = Math.floor(CENTER - R); x <= CENTER + R; x++) {
+      const inBuilding = x >= 0 && z >= 0 && x < SIZE && z < SIZE;
+      const ok = x < CENTER + R && onIsland(x + 0.5, z + 0.5) && !inBuilding;
+      if (ok && run === -1) run = x;
+      if (!ok && run !== -1) { S.moss.box({ x0: run, y0: -SLAB, z0: z, x1: x, y1: 0, z1: z + 1 }, 'Y'); run = -1; }
+    }
+    for (let x = Math.floor(CENTER - R); x < CENTER + R; x++) {
+      if (!onIsland(x + 0.5, z + 0.5)) continue;
+      const d = depth(x, z);
+      S.belly.box({ x0: x, y0: -d, z0: z, x1: x + 1, y1: 0, z1: z + 1 }, 'y', [0.7, 0.62, 0.66]);
+      for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
+        const nx = x + dx, nz = z + dz;
+        const nd = onIsland(nx + 0.5, nz + 0.5) ? depth(nx, nz) : 0;
+        if (nd < d) S.belly.box({ x0: x, y0: -d, z0: z, x1: x + 1, y1: -nd, z1: z + 1 }, f, [0.75, 0.66, 0.7], 0.6);
+      }
+    }
   }
-  scene.add(group);
+  const staticGroup = new THREE.Group();
+  for (const k of Object.keys(S) as K[]) if (S[k].idx.length) staticGroup.add(S[k].build(M[k]));
+  scene.add(staticGroup);
 
-  // ---- doors ----
-  const dtex = doorTex();
-  const doorMat = new THREE.MeshLambertMaterial({ map: dtex });
+  // ---------------- dynamic parts: per level (walls are tissue segments, slabs can be dug) ----------------
+  const levelGroups: THREE.Group[] = [];
+  const finishOf = (L: number, x: number, z: number): K => (L === LEVELS - 1 ? 'roe' : L === 0 ? (inAtrium(x, z) ? 'soil' : 'nacre') : 'felt');
+  const isWall = (L: number, x: number, z: number, s: number) => cellAt(L, x, z) === '#' && !ws.broken(blockKey(L, x, z, s));
+
+  function buildLevel(L: number) {
+    const D = Object.fromEntries(Object.keys(M).map((k) => [k, new Mesher()])) as Record<K, Mesher>;
+    const base = L * FLOOR_H;
+    const g = LEVEL_GRIDS[L];
+    const slab = (x: number, z: number) => cellAt(L, x, z) !== null && cellAt(L, x, z) !== 'o' && !ws.broken(blockKey(L, x, z, -1));
+    // slabs: top finish merged per row & material, bone ceiling below, wound/bone edges
+    for (let z = 0; z < SIZE; z++) {
+      let run = -1; let runK: K | null = null;
+      for (let x = 0; x <= SIZE; x++) {
+        const k = x < SIZE && slab(x, z) ? finishOf(L, x, z) : null;
+        if (run >= 0 && k !== runK) {
+          const box = { x0: run, y0: base - SLAB, z0: z, x1: x, y1: base, z1: z + 1 };
+          D[runK!].box(box, 'Y');
+          if (L > 0) D.bone.box(box, 'y', [1.1, 1.1, 1.1]);
+          run = -1; runK = null;
+        }
+        if (k && run < 0) { run = x; runK = k; }
+      }
+      if (L > 0) for (let x = 0; x < SIZE; x++) {
+        if (!slab(x, z)) continue;
+        const b = { x0: x, y0: base - SLAB, z0: z, x1: x + 1, y1: base, z1: z + 1 };
+        for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
+          const n = cellAt(L, x + dx, z + dz);
+          if (n === null) D.bone.box(b, f, W, 1); // the frame shows as a bone band on the facade
+          else if (!slab(x + dx, z + dz)) D.wound.box(b, f, W, 1); // holes and dug floors are open wounds
+        }
+      }
+    }
+    // wall tissue segments
+    if (L < LEVELS - 1) for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
+      if (g[z][x] !== '#') continue;
+      for (let s = 0; s < SEGS; s++) {
+        if (!isWall(L, x, z, s)) continue;
+        const b = { x0: x, y0: base + s * SEG_H, z0: z, x1: x + 1, y1: base + (s + 1) * SEG_H, z1: z + 1 };
+        for (const [f, dx, dz] of [['X', 1, 0], ['x', -1, 0], ['Z', 0, 1], ['z', 0, -1]] as const) {
+          const n = cellAt(L, x + dx, z + dz);
+          if (n === '#') { if (!isWall(L, x + dx, z + dz, s)) D.wound.box(b, f, W, 1); continue; }
+          if (n === 'w' || n === 'D') continue;
+          (n === null ? D.scales : D.membrane).box(b, f, W, s === 0 ? 0.75 : 1);
+        }
+        if (s < SEGS - 1 && !isWall(L, x, z, s + 1)) D.wound.box(b, 'Y');
+        if (s === SEGS - 1 && L + 1 < LEVELS && ws.broken(blockKey(L + 1, x, z, -1))) D.wound.box(b, 'Y');
+        if (s > 0 && !isWall(L, x, z, s - 1)) D.wound.box(b, 'y');
+      }
+    }
+    const grp = new THREE.Group();
+    for (const k of Object.keys(D) as K[]) if (D[k].idx.length) grp.add(D[k].build(M[k]));
+    return grp;
+  }
+  for (let L = 0; L < LEVELS; L++) { const g = buildLevel(L); levelGroups.push(g); scene.add(g); }
+  const rebuildLevel = (L: number) => {
+    if (L < 0 || L >= LEVELS) return;
+    const old = levelGroups[L];
+    scene.remove(old);
+    old.traverse((o) => { if (o instanceof THREE.Mesh) o.geometry.dispose(); });
+    levelGroups[L] = buildLevel(L);
+    scene.add(levelGroups[L]);
+  };
+
+  // ---------------- doors: two lips of membrane that part ----------------
+  const lipMat = living(new THREE.MeshLambertMaterial({ map: lipTex() }), { veins: 0.8, veinColor: 0xff4080, veinScale: 0.6, halo: 0.5, haloColor: 0xff90b0, reach: 3, base: 0.08 });
   const doors = new Map<string, DoorView>();
   for (const d of DOORS) {
-    const pivot = new THREE.Group();
     const base = d.level * FLOOR_H;
-    // hinge at the min end of the door, on the centre line
-    if (d.axis === 'x') pivot.position.set(d.x0, base, d.z0 + 0.5);
-    else pivot.position.set(d.x0 + 0.5, base, d.z0);
-    const geo = new THREE.BoxGeometry(d.len, DOOR_H - 0.02, DOOR_THICK);
-    const mesh = new THREE.Mesh(geo, doorMat);
-    mesh.position.set(d.len / 2, DOOR_H / 2, 0);
-    if (d.axis === 'z') pivot.rotation.y = -Math.PI / 2;
-    pivot.userData.baseRot = pivot.rotation.y;
-    pivot.add(mesh);
-    scene.add(pivot);
-    doors.set(d.id, { door: d, pivot, angle: 0, target: 0 });
+    const half = d.len / 2;
+    const mk = (side: -1 | 1) => {
+      const pivot = new THREE.Group();
+      const geo = new THREE.BoxGeometry(half, DOOR_H - 0.02, DOOR_THICK + 0.1);
+      geo.translate(-half / 2, DOOR_H / 2, 0); // anchored at its outer (right) edge
+      pivot.add(new THREE.Mesh(geo, lipMat));
+      if (d.axis === 'x') pivot.position.set(side < 0 ? d.x0 : d.x0 + d.len, base, d.z0 + 0.5);
+      else { pivot.position.set(d.x0 + 0.5, base, side < 0 ? d.z0 : d.z0 + d.len); pivot.rotation.y = -Math.PI / 2; }
+      if (side < 0) pivot.scale.x = -1; // mirror the left lip
+      scene.add(pivot);
+      return pivot;
+    };
+    const v: DoorView = { door: d, left: mk(-1), right: mk(1), open: 0, target: 1 };
+    doors.set(d.id, v);
   }
 
-  return { group, doors };
+  return { doors, rebuildLevel, materials: M };
 }
 
 export function updateDoors(doors: Map<string, DoorView>, dt: number) {
   for (const v of doors.values()) {
-    if (Math.abs(v.angle - v.target) < 0.001) continue;
-    v.angle += (v.target - v.angle) * Math.min(1, dt * 8);
-    v.pivot.rotation.y = v.pivot.userData.baseRot + v.angle;
+    if (Math.abs(v.open - v.target) < 0.001) continue;
+    v.open += (v.target - v.open) * Math.min(1, dt * 7);
+    if (Math.abs(v.open - v.target) < 0.002) v.open = v.target;
+    const k = 1 - v.open * 0.88; // open lips retract to 12% of their width
+    v.left.scale.x = -k; v.right.scale.x = k;
   }
 }
 
-export function buildSky(scene: THREE.Scene) {
-  const geo = new THREE.SphereGeometry(400, 24, 12);
-  const cols: number[] = [];
-  const top = new THREE.Color('#1a1238'), mid = new THREE.Color('#5b3a78'), hor = new THREE.Color('#f0a6a0');
-  const p = geo.attributes.position;
-  const c = new THREE.Color();
-  for (let i = 0; i < p.count; i++) {
-    const y = p.getY(i) / 400;
-    if (y > 0.25) c.copy(mid).lerp(top, Math.min(1, (y - 0.25) / 0.6));
-    else c.copy(hor).lerp(mid, Math.max(0, (y + 0.05) / 0.3));
-    cols.push(c.r, c.g, c.b);
-  }
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
-  const sky = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false }));
-  sky.renderOrder = -10;
-  scene.add(sky);
-  // stars
-  const sp: number[] = [];
-  let s = 99;
+// ---------------- cilia: the island's "grass" — instanced blades that bend away from people ----------------
+export function buildCilia(scene: THREE.Scene, mobile: boolean) {
+  const pts: number[] = [];
+  let s = 4242;
   const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
-  for (let i = 0; i < 500; i++) {
-    const a = rnd() * Math.PI * 2, e = 0.2 + rnd() * 1.3;
-    sp.push(Math.cos(a) * Math.cos(e) * 380, Math.sin(e) * 380, Math.sin(a) * Math.cos(e) * 380);
+  const per = mobile ? 0.9 : 2.2;
+  for (let z = Math.floor(CENTER - 46); z < CENTER + 46; z++) for (let x = Math.floor(CENTER - 46); x < CENTER + 46; x++) {
+    if (x >= -1 && z >= -1 && x <= SIZE && z <= SIZE) continue;
+    const n = Math.floor(per + rnd());
+    for (let i = 0; i < n; i++) {
+      const px = x + rnd(), pz = z + rnd();
+      if (!onIsland(px, pz)) continue;
+      pts.push(px, pz, 0.3 + rnd() * 0.45, rnd() * Math.PI);
+    }
   }
-  const sg = new THREE.BufferGeometry();
-  sg.setAttribute('position', new THREE.Float32BufferAttribute(sp, 3));
-  const stars = new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xfff4e0, size: 2, sizeAttenuation: false, fog: false }));
-  scene.add(stars);
-  return { sky, stars };
+  const count = pts.length / 4;
+  const blade = new THREE.PlaneGeometry(0.07, 1, 1, 3);
+  blade.translate(0, 0.5, 0);
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.index = blade.index;
+  geo.setAttribute('position', blade.getAttribute('position'));
+  geo.setAttribute('aBlade', new THREE.InstancedBufferAttribute(new Float32Array(pts), 4));
+  geo.instanceCount = count;
+  const uniforms = {
+    ...LIFE,
+    fogColor: { value: new THREE.Color() },
+    fogNear: { value: 10 },
+    fogFar: { value: 100 },
+  };
+  const mat = new THREE.ShaderMaterial({
+    uniforms,
+    side: THREE.DoubleSide,
+    vertexShader: /* glsl */ `
+      attribute vec4 aBlade; // x, z, height, angle
+      uniform vec4 uPeople[8];
+      uniform float uTime;
+      varying float vH; varying float vNear; varying float vDepth;
+      void main() {
+        float h = aBlade.z;
+        vec3 p = position;
+        float c = cos(aBlade.w), s = sin(aBlade.w);
+        p.xz = vec2(p.x * c, p.x * s);
+        float y = p.y * h;
+        vec3 root = vec3(aBlade.x, 0.0, aBlade.y);
+        vec2 push = vec2(0.0); float near = 0.0;
+        for (int i = 0; i < 8; i++) {
+          vec4 q = uPeople[i];
+          if (q.w <= 0.0 || abs(q.y) > 1.5) continue;
+          vec2 d = root.xz - q.xz;
+          float l = length(d);
+          float k = smoothstep(1.8, 0.0, l) * q.w;
+          push += normalize(d + 1e-4) * k;
+          near = max(near, k);
+        }
+        float bend = p.y * p.y;
+        vec2 sway = vec2(sin(uTime * 1.3 + root.x * 0.7), cos(uTime * 1.1 + root.z * 0.6)) * 0.12;
+        vec3 w = root + vec3(p.x, y, p.z);
+        w.xz += (push * 0.9 + sway) * bend * h;
+        w.y -= length(push) * bend * h * 0.45;
+        vH = p.y; vNear = near;
+        vec4 mv = viewMatrix * vec4(w, 1.0);
+        vDepth = -mv.z;
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform float uBeat;
+      uniform vec3 fogColor; uniform float fogNear, fogFar;
+      varying float vH; varying float vNear; varying float vDepth;
+      void main() {
+        vec3 baseC = vec3(0.10, 0.20, 0.22);
+        vec3 tipC = mix(vec3(0.35, 0.95, 0.85), vec3(1.0, 0.55, 0.85), vNear);
+        vec3 col = mix(baseC, tipC, smoothstep(0.4, 1.0, vH)) * (0.6 + vNear * (1.2 + uBeat * 0.6));
+        col = mix(col, fogColor, smoothstep(fogNear, fogFar, vDepth));
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  return { mesh, uniforms, count };
+}
+
+// ---------------- the void below: dim spores drifting up ----------------
+export function buildVoid(scene: THREE.Scene) {
+  const n = 900;
+  const p = new Float32Array(n * 3);
+  let s = 77;
+  const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+  for (let i = 0; i < n; i++) {
+    const a = rnd() * Math.PI * 2, r = 20 + rnd() * 140;
+    p[i * 3] = CENTER + Math.cos(a) * r; p[i * 3 + 1] = -10 - rnd() * 120; p[i * 3 + 2] = CENTER + Math.sin(a) * r;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: LIFE.uTime },
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `uniform float uTime; varying float vA;
+      void main() { vec3 q = position; q.y = mod(q.y + uTime * 1.5 + 130.0, 130.0) - 138.0; q.x += sin(uTime * 0.2 + position.z) * 2.0;
+        vec4 mv = modelViewMatrix * vec4(q, 1.0); vA = smoothstep(-138.0, -50.0, q.y) * smoothstep(-6.0, -24.0, q.y);
+        gl_PointSize = clamp(260.0 / -mv.z, 1.0, 4.0); gl_Position = projectionMatrix * mv; }`,
+    fragmentShader: `varying float vA; void main() { gl_FragColor = vec4(vec3(0.75, 0.55, 1.0) * vA, 1.0); }`,
+  });
+  const pts = new THREE.Points(g, mat);
+  pts.frustumCulled = false;
+  scene.add(pts);
+  return pts;
 }

@@ -16,8 +16,31 @@ export const WIN_LO = 1.2;
 export const WIN_HI = 3.0;
 export const DOOR_H = 3.0;
 export const PAD_H = 0.6;
-export const WORLD_R = 62; // walkable radius around building center
 export const CENTER = SIZE / 2;
+// walls are made of 5 stacked tissue segments (0.9m) so the pickaxe can wound them piece by piece
+export const SEG_H = 0.9;
+export const SEGS = 5;
+// the organism floats as an island above the void; falling below DEATH_Y is death, forever
+export const ISLAND_R = 40;
+export const DEATH_Y = -16;
+export const REGROW_MS = 15 * 60 * 1000;
+
+/** irregular shoreline of the floating island */
+export function islandEdge(angle: number) {
+  return ISLAND_R + Math.sin(angle * 3 + 1.3) * 2.2 + Math.sin(angle * 7 + 0.4) * 1.3 + Math.sin(angle * 13) * 0.6;
+}
+export function onIsland(x: number, z: number) {
+  const dx = x - CENTER, dz = z - CENTER;
+  return Math.hypot(dx, dz) <= islandEdge(Math.atan2(dz, dx));
+}
+
+/** dynamic world state the geometry depends on */
+export interface WorldState {
+  doorOpen: (id: string) => boolean;
+  broken: (key: string) => boolean;
+}
+/** key of a breakable block: wall segment s=0..4, slab s=-1 */
+export const blockKey = (L: number, x: number, z: number, s: number) => `${L}.${x}.${z}.${s}`;
 
 export type Grid = string[][]; // [z][x]
 
@@ -121,9 +144,9 @@ export const isStair = (c: string | null) => c !== null && c >= '0' && c <= '9';
 export const stairH = (c: string) => (c.charCodeAt(0) - 48 + 1) * 0.5;
 
 // ---------- Giant mushrooms (extra solid objects) ----------
-export interface Box { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number; bounce?: number; kind?: string; species?: number }
+export interface Box { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number; bounce?: number; kind?: string; species?: number; climb?: 'facade' | 'stem' }
 
-export const MUSHROOM_STEM: Box = { x0: 19.2, y0: 0, z0: 19.2, x1: 21.8, y1: 10.5, z1: 21.8, kind: 'stem' };
+export const MUSHROOM_STEM: Box = { x0: 19.2, y0: 0, z0: 19.2, x1: 21.8, y1: 10.5, z1: 21.8, kind: 'stem', climb: 'stem' };
 export const MUSHROOM_CAP: Box = { x0: 17, y0: 10.5, z0: 17, x1: 24, y1: 11.4, z1: 24, kind: 'cap' };
 export const MUSHROOM_TOP: Box = { x0: 18, y0: 11.4, z0: 18, x1: 23, y1: 11.9, z1: 23, kind: 'cap' };
 
@@ -136,7 +159,7 @@ export const MEADOW_SHROOMS: Shroom[] = (() => {
   const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
   for (let i = 0; i < 26; i++) {
     const a = rnd() * Math.PI * 2;
-    const d = 30 + rnd() * 26;
+    const d = 30 + rnd() * 6.5;
     out.push({ x: CENTER + Math.cos(a) * d, z: CENTER + Math.sin(a) * d, h: 3 + rnd() * 9, r: 1.5 + rnd() * 3.5, species: Math.floor(rnd() * 5) });
   }
   return out;
@@ -147,7 +170,7 @@ export const STATIC_BOXES: Box[] = [
   MUSHROOM_CAP,
   MUSHROOM_TOP,
   ...MEADOW_SHROOMS.flatMap((m): Box[] => [
-    { x0: m.x - 0.4 - m.r * 0.15, y0: 0, z0: m.z - 0.4 - m.r * 0.15, x1: m.x + 0.4 + m.r * 0.15, y1: m.h, z1: m.z + 0.4 + m.r * 0.15, kind: 'stem', species: m.species },
+    { x0: m.x - 0.4 - m.r * 0.15, y0: 0, z0: m.z - 0.4 - m.r * 0.15, x1: m.x + 0.4 + m.r * 0.15, y1: m.h, z1: m.z + 0.4 + m.r * 0.15, kind: 'stem', species: m.species, climb: 'stem' },
     { x0: m.x - m.r, y0: m.h, z0: m.z - m.r, x1: m.x + m.r, y1: m.h + 0.8, z1: m.z + m.r, kind: 'cap', species: m.species },
     { x0: m.x - m.r * 0.6, y0: m.h + 0.8, z0: m.z - m.r * 0.6, x1: m.x + m.r * 0.6, y1: m.h + 1.3, z1: m.z + m.r * 0.6, kind: 'cap', species: m.species, bounce: m.h < 7 ? 15 : 0 },
   ]),
@@ -200,34 +223,41 @@ export function doorBox(d: Door): Box {
 }
 
 // ---------- Collision ----------
-/** Push boxes of the voxel cell into out. doorsOpen: id -> open */
-export function cellBoxes(L: number, x: number, z: number, out: Box[], doorOpen: (id: string) => boolean) {
+export const isPerimeter = (x: number, z: number) => x === 0 || z === 0 || x === SIZE - 1 || z === SIZE - 1;
+
+/** Push boxes of the voxel cell into out. */
+export function cellBoxes(L: number, x: number, z: number, out: Box[], ws: WorldState) {
   const base = L * FLOOR_H;
   const inside = x >= 0 && z >= 0 && x < SIZE && z < SIZE;
   if (!inside) {
-    if (L === 0) out.push({ x0: x, y0: -SLAB, z0: z, x1: x + 1, y1: 0, z1: z + 1 });
+    if (L === 0 && onIsland(x + 0.5, z + 0.5)) out.push({ x0: x, y0: -SLAB, z0: z, x1: x + 1, y1: 0, z1: z + 1 });
     return;
   }
   const c = LEVEL_GRIDS[L][z][x];
-  if (c !== 'o') out.push({ x0: x, y0: base - SLAB, z0: z, x1: x + 1, y1: base, z1: z + 1 });
+  const facade = isPerimeter(x, z) ? 'facade' as const : undefined;
+  if (c !== 'o' && !ws.broken(blockKey(L, x, z, -1))) out.push({ x0: x, y0: base - SLAB, z0: z, x1: x + 1, y1: base, z1: z + 1, climb: facade });
   if (L === LEVELS - 1 && c === '#') return;
   switch (c) {
-    case '#': out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 }); break;
+    case '#':
+      for (let sg = 0; sg < SEGS; sg++) {
+        if (ws.broken(blockKey(L, x, z, sg))) continue;
+        out.push({ x0: x, y0: base + sg * SEG_H, z0: z, x1: x + 1, y1: base + (sg + 1) * SEG_H, z1: z + 1, climb: facade });
+      }
+      break;
     case 'w':
-      out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + WIN_LO, z1: z + 1 });
-      out.push({ x0: x, y0: base + WIN_HI, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 });
+      out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + WIN_LO, z1: z + 1, climb: facade });
+      out.push({ x0: x, y0: base + WIN_HI, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1, climb: facade });
       break;
     case 'D': {
-      out.push({ x0: x, y0: base + DOOR_H, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1 });
+      out.push({ x0: x, y0: base + DOOR_H, z0: z, x1: x + 1, y1: base + WALL_H, z1: z + 1, climb: facade });
       const d = doorAtCell(L, x, z);
-      if (d && !doorOpen(d.id)) {
+      if (d && !ws.doorOpen(d.id)) {
         const b = doorBox(d);
-        // clip to this cell
         out.push({ x0: Math.max(b.x0, x), y0: b.y0, z0: Math.max(b.z0, z), x1: Math.min(b.x1, x + 1), y1: b.y1, z1: Math.min(b.z1, z + 1) });
       }
       break;
     }
-    case 'r': out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1 }); break;
+    case 'r': out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + RAIL_H, z1: z + 1, climb: facade }); break;
     case 'b': out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + PAD_H, z1: z + 1, bounce: BOUNCE_SMALL }); break;
     case 'B': out.push({ x0: x, y0: base, z0: z, x1: x + 1, y1: base + PAD_H, z1: z + 1, bounce: BOUNCE_BIG }); break;
     default:
@@ -236,13 +266,13 @@ export function cellBoxes(L: number, x: number, z: number, out: Box[], doorOpen:
 }
 
 /** All solid boxes overlapping the given AABB region */
-export function boxesIn(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, doorOpen: (id: string) => boolean): Box[] {
+export function boxesIn(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, ws: WorldState): Box[] {
   const out: Box[] = [];
   const L0 = Math.max(0, Math.floor((y0 + SLAB) / FLOOR_H) - 1);
   const L1 = Math.min(LEVELS - 1, Math.floor((y1 + SLAB) / FLOOR_H));
   for (let L = L0; L <= L1; L++)
     for (let z = Math.floor(z0); z <= Math.floor(z1); z++)
-      for (let x = Math.floor(x0); x <= Math.floor(x1); x++) cellBoxes(L, x, z, out, doorOpen);
+      for (let x = Math.floor(x0); x <= Math.floor(x1); x++) cellBoxes(L, x, z, out, ws);
   for (const b of STATIC_BOXES) if (b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1 && b.z1 > z0 && b.z0 < z1) out.push(b);
   return out;
 }
@@ -325,11 +355,11 @@ export function raycastPanels(ox: number, oy: number, oz: number, dx: number, dy
 }
 
 /** Ray vs solid geometry via sampling (cheap, coarse). Returns distance to first solid or Infinity */
-export function raycastSolid(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, doorOpen: (id: string) => boolean) {
+export function raycastSolid(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, ws: WorldState) {
   const step = 0.05;
   for (let t = 0.2; t < maxDist; t += step) {
     const x = ox + dx * t, y = oy + dy * t, z = oz + dz * t;
-    const bs = boxesIn(x, y, z, x, y, z, doorOpen);
+    const bs = boxesIn(x, y, z, x, y, z, ws);
     for (const b of bs) if (x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1 && z > b.z0 && z < b.z1) return t;
   }
   return Infinity;
@@ -414,4 +444,48 @@ export const MIRRORS: Mirror[] = (() => {
 })();
 export function insideMirror(panelId: string, u: number, v: number, pad = 0.1) {
   return MIRRORS.some((m) => m.panel === panelId && u > m.u0 - pad && u < m.u1 + pad && v > m.v0 - pad && v < m.v1 + pad);
+}
+
+// ---------- Breaking (pickaxe) ----------
+/** hardness in seconds of holding the pickaxe, 0 = unbreakable */
+export function hardness(L: number, x: number, z: number, s: number): number {
+  const c = cellAt(L, x, z);
+  if (c === null) return 0;
+  if (s === -1) {
+    // floors above ground can be dug through (not the ground, not under walls/stairs/doors)
+    if (L === 0) return 0;
+    return c === ' ' ? 1.1 : 0;
+  }
+  if (c !== '#' || L >= LEVELS - 1 || s < 0 || s >= SEGS) return 0;
+  // the mirrors are not tissue
+  for (const m of MIRRORS) {
+    if (m.level !== L || s > 3) continue;
+    if (m.id.endsWith('n') && z === 0 && x >= 18 && x <= 22) return 0;
+    if (m.id.endsWith('e') && x === SIZE - 1 && z >= 18 && z <= 22) return 0;
+  }
+  return 0.6;
+}
+
+export function parseKey(key: string) {
+  const [L, x, z, s] = key.split('.').map(Number);
+  return { L, x, z, s };
+}
+
+/** Which breakable block does the ray hit first (null if something unbreakable is in the way) */
+export function raycastBlock(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, ws: WorldState) {
+  const step = 0.03;
+  for (let t = 0.1; t < maxDist; t += step) {
+    const x = ox + dx * t, y = oy + dy * t, z = oz + dz * t;
+    const bs = boxesIn(x, y, z, x, y, z, ws);
+    const hit = bs.find((b) => x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1 && z > b.z0 && z < b.z1);
+    if (!hit) continue;
+    const ix = Math.floor(x), iz = Math.floor(z);
+    const L = Math.floor((y + SLAB) / FLOOR_H);
+    const local = y - L * FLOOR_H;
+    const s = local < 0 ? -1 : Math.floor(local / SEG_H);
+    if (hit.kind || hit.bounce) return null;
+    if (!hardness(L, ix, iz, s)) return null;
+    return { L, x: ix, z: iz, s, t, key: blockKey(L, ix, iz, s) };
+  }
+  return null;
 }
